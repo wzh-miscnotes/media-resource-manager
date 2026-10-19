@@ -1,0 +1,33 @@
+# ===== 数据文件（视频/字幕/封面/缓存，禁止入库）=====
+downloads/
+.thumbnail_cache/
+
+# ===== Python 缓存 =====
+__pycache__/
+*.pyc
+
+# ===== 二进制依赖（ffmpeg 等，体积大且不跨平台）=====
+bin/
+
+# ===== 本地环境配置（含可能的代理/路径，留 config.example.json）=====
+config.json
+
+# ===== 本地验证脚本与截图（不入库）=====
+_ui_*.cjs
+_verify_*.py
+_probe_contact/
+*.png
+
+# ===== RM 运行时数据（资源池 / 用户合集 / 文章簇，禁止入库）=====
+resources/
+users/
+_articles/
+
+# ===== 本地 agent 元数据（含 memory 日志，不入库）=====
+.workbuddy/
+
+# ===== 日志 / 虚拟环境（兜底）=====
+*.log
+logs/
+venv/
+.venv/
