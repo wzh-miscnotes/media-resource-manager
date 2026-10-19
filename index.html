@@ -822,6 +822,7 @@ async function fetchWithTimeout(url, options={}, timeoutMs=30000){
 }
 
 /* ==================== 解析 ==================== */
+let _RM_SID = "";   // 会话标识缓存（localStorage 持久化）；未声明会在首次读取时抛 ReferenceError
 function getSessionId(){
   if(_RM_SID) return _RM_SID;
   try { _RM_SID = localStorage.getItem("rm_sid"); } catch(e) {}
