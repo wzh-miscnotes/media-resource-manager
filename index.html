@@ -992,18 +992,21 @@ async function renderLibGrid(){
     const dur = it.duration ? `<span>${fmtDur(it.duration)}</span>` : "";
     const stale = it.stale ? `<span class="stale">文件缺失</span>` : "";
     const _src = it.subtitle_source || "";
-    const subTag = it.subtitle ? `<span class="${_src==="ocr"?"tag-ocr":_src==="official"?"tag-official":""}">${_src==="ocr"?"OCR字幕":_src==="official"?"官方字幕":"有字幕"}</span>` : "";
+    // 官方字幕：视频平台官方接口下载（subtitle_source="official"）或显式标记 "official"。
+    // 这类字幕质量已够，OCR 覆盖只会降级且改变 .bak 指向，故默认隐藏「重新识别」入口。
+    const isOfficial = (_src === "official" || _src === "official");
+    const subTag = it.subtitle ? `<span class="${_src==="ocr"?"tag-ocr":isOfficial?"tag-official":""}">${_src==="ocr"?"OCR字幕":isOfficial?"官方字幕":"有字幕"}</span>` : "";
     const checked = _sel.has(it.rel_path) ? "checked" : "";
     const picked = _sel.has(it.rel_path) ? " picked" : "";
     // 内嵌硬字幕（字幕条 OCR）入口 —— 仅自己的视频：
     //  · 无字幕            → 「🔤 识别内嵌字幕」
     //  · 已有 OCR 字幕     → 「🔄 重新识别」（用当前档位重跑并覆盖）
-    //  · 已有 视频平台官方字幕 → 隐藏 OCR 按钮（官方字幕质量已够，OCR 覆盖只会降级且改变 .bak 指向）
+    //  · 已有 视频平台官方字幕（subtitle_source="official"/"official"）→ 隐藏 OCR 按钮
     //  · 共享视频          → 隐藏
     // 纵向位置：与「✍️ 文章」错开（有字幕时两者并存 → 76px）
     // 注：artBtn / arts / artBlock 已在上方（isShared 之前）统一定义，此处两个分支共用，不再重复声明
     const ocrBtnTop = it.subtitle ? 76 : 42;
-    const ocrBtn = (it.shared || _src === "official") ? "" : (it.subtitle
+    const ocrBtn = (it.shared || isOfficial) ? "" : (it.subtitle
       ? `<button class="share-btn ocr-btn" style="top:${ocrBtnTop}px" title="重新识别内嵌硬字幕（会覆盖现有字幕文件；可选择识别密度）" onclick="event.stopPropagation();rerunOcrSubtitle(${i})">🔄 重新识别</button>`
       : `<button class="share-btn ocr-btn" style="top:${ocrBtnTop}px" title="识别视频内嵌的硬字幕（需视频本身带字幕条；可选择识别密度）" onclick="event.stopPropagation();runOcrSubtitle(${i})">🔤 识别字幕</button>`);
     return `<div class="lib-card${picked}" onclick="openPlayerTab(${i})">
