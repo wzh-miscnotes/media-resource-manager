@@ -214,16 +214,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CACHE_DIR = os.path.join(DOWNLOADS, "_cache")
-
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-DL_CACHE_FILE = os.path.join(CACHE_DIR, "cache.json")
-
-DL_CACHE = {}                              # key -> {"ts": float, "paths": [rel...]}
-
-CACHE_TTL = 86400                          # 1 天
-
 FRAG_RE = re.compile(r"\.f\d+\.[a-z0-9]+$")
 
 MEDIA_EXT = (".mp4", ".mkv", ".webm", ".flv", ".mov", ".m4a", ".mp3", ".aac")
@@ -2102,20 +2092,6 @@ def delete_files(req: DeleteFilesReq, sid: str = Depends(current_identity)):
             )
             if not still_has:
                 _lock_owner_shares(sid, rid)
-    # ===== 删除视频本体后，同步使「视频本体缓存」失效 =====
-    # record_cache 会把媒体文件另存到 downloads/_cache/{key}/。若只删 users/ 下的文件而保留
-    # 缓存副本，重新下载时 _copy_body_cache 仍会命中并把旧副本拷回，造成「删了也重下不了 / 删了又复活」。
-    if deleted:
-        _media_deleted = [r for r in deleted if r.lower().endswith(MEDIA_EXT)]
-        if _media_deleted:
-            _purged = []
-            for _k, _e in list(DL_CACHE.items()):
-                _cp = _e.get("paths") or []
-                if any(_p in _media_deleted for _p in _cp):
-                    _purged.append(_k)
-            for _k in _purged:
-                shutil.rmtree(os.path.join(CACHE_DIR, _k), ignore_errors=True)
-                DL_CACHE.pop(_k, None)
     _save_collections()
     pruned = _prune_orphan_dirs(set(touched_dirs), sid)
     return {"ok": True, "deleted": deleted, "missing": missing, "pruned_dirs": pruned, "trashed_resources": trashed}
@@ -2126,9 +2102,9 @@ async def upload_files(
     files: list[UploadFile] = File(...),
     sid: str = Depends(current_identity),
 ):
-    """从浏览器上传本地视频（及其字幕），按「内容哈希 rid + (文件名|大小) body_key8」直接入资源池；
+    """从浏览器上传本地视频（及其字幕），按「内容哈希 rid + 内容派生 body_key8」直接入资源池；
     走 _add_to_collection 登记合集引用，删除引用归零即入 __trash__（与资源池条目同保护）。
-    见 RM-实施指引 §2.2。"""
+    见 RM-实施指引 §2.2。内容级去重由 _ingest_into_pool 保证（同内容只存一份）。"""
     SUB_EXTS = (".srt", ".vtt", ".ass", ".lrc", ".txt")
     videos, subs = [], []
     for f in files:
@@ -2149,8 +2125,10 @@ async def upload_files(
         except Exception:
             continue
         size = len(data)
-        rid = "r" + hashlib.sha256(data).hexdigest()[:15]
-        body_key8 = hashlib.sha256(f"{f.filename}|{size}".encode()).hexdigest()[:8]
+        h = hashlib.sha256(data).hexdigest()
+        rid = "r" + h[:15]
+        body_key8 = _body_key8_from_hash(h)
+        content_sha256 = h
         safe = _safe_upload_name(f.filename)
         dest = _uniq_path(os.path.join(stage_dir, safe))
         with open(dest, "wb") as w:
@@ -2175,7 +2153,8 @@ async def upload_files(
         extras = [saved_subs[sub_fn]] if sub_fn else []
         try:
             _ingest_into_pool(sid, rid, body_key8, dest, extras,
-                              _title_from_filename(fname), target_cid=cid)
+                              _title_from_filename(fname), target_cid=cid,
+                              content_sha256=content_sha256)
             added += 1
         except HTTPException:
             pass
@@ -3604,23 +3583,64 @@ def _sha256_of_file(fp):
     return h.hexdigest()
 
 
-def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target_cid="default",
-                      vid="", seq=""):
-    """统一入池 + 登记合集引用（ingest / upload / import-dir 共用，见 RM-实施指引 §2）。
+# 资源池 body_key8 派生（O3 治本，2026-10-20）：
+# 历史上 body_key8 = sha256(文件名|大小)[:8] —— 与内容无关，导致「同内容不同文件名」落两份。
+# 现改为与文件内容绑定：rid 取内容哈希 [:15]，body_key8 取同一哈希的 [16:24] 窗口
+# （与 rid 前缀不重叠，仍为纯内容派生）。保证「同内容即同 body_key8」，入池即可去重。
+# 该公式在 app.py / inbox_watcher.py / scripts/migrate_body_key8.py 三处须保持一致。
+_BODY_KEY8_WIN = slice(16, 24)
 
-    - 若 resources/<rid>/<body_key8>/ 已存在主媒体 -> dedup_hit=True（不再迁文件，仅引用+1）；
-    - 否则把 staging 主文件 + 附加物迁入池；
-    - 始终 _add_to_collection 登记引用（删除引用归零即入 __trash__，与资源池同保护）。
+
+def _body_key8_from_hash(h: str) -> str:
+    """由内容 sha256 十六进制串派生 body_key8（纯内容派生，与文件名/大小无关）。"""
+    return h[_BODY_KEY8_WIN]
+
+
+def _find_identical_media(pool_dir, content_sha256):
+    """在 pool_dir 内查找与 content_sha256 完全相同内容的主媒体文件绝对路径；无则 None。
+
+    用于内容级去重（O3 治本）：即使文件名不同，只要字节完全一致就复用已有文件，
+    不再存第二份。"""
+    if not content_sha256 or not os.path.isdir(pool_dir):
+        return None
+    for fn in os.listdir(pool_dir):
+        if not fn.lower().endswith(MEDIA_EXT):
+            continue
+        p = os.path.join(pool_dir, fn)
+        if os.path.isfile(p) and _sha256_of_file(p) == content_sha256:
+            return p
+    return None
+
+
+def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target_cid="default",
+                      vid="", seq="", subtitle_source="", cover="", content_sha256=""):
+    """统一入池 + 登记合集引用（ingest / upload / import-dir / watcher 共用，见 RM-实施指引 §2）。
+
+    去重（O3 治本，2026-10-20）：body_key8 已改为「文件内容哈希派生」，配合此处的内容级去重，
+    保证「同内容（无论文件名/大小）只存一份」：
+      - resources/<rid>/<body_key8>/ 内若已有与 content_sha256 完全相同的主媒体 -> dedup_hit=True，
+        复用已有文件、丢弃刚迁入的重复副本（附加物字幕/封面仍迁入）；
+      - 否则把 staging 主文件 + 附加物迁入池。
+    content_sha256 由调用方传入（调用方本就为算 rid/body_key8 哈希过文件，避免重复 I/O）。
+    始终 _add_to_collection 登记引用（删除引用归零即入 __trash__，与资源池同保护）。
     返回 (resource_id, dedup_hit, rel_path)。
     """
     pool_dir = _pool_dir(rid, body_key8)
-    dedup_hit = False
-    if os.path.isdir(pool_dir):
-        dedup_hit = any(fn.lower().endswith(MEDIA_EXT) for fn in os.listdir(pool_dir))
+    existing = _find_identical_media(pool_dir, content_sha256)
+    dedup_hit = bool(existing)
     new_main, new_extras = _move_staged_to_pool(main_abs, list(extras_abs or []), rid, body_key8)
-    if not new_main:
+    if not new_main and not existing:
         raise HTTPException(400, "主媒体文件不存在或迁入资源池失败")
-    rel_main = os.path.relpath(new_main, DOWNLOADS).replace(os.sep, "/")
+    if existing:
+        # 复用池内已有内容文件，丢弃刚迁入的重复副本（O3 治本：同内容不同文件名亦只存一份）
+        try:
+            if os.path.abspath(new_main) != os.path.abspath(existing):
+                os.remove(new_main)
+        except OSError:
+            pass
+        rel_main = os.path.relpath(existing, DOWNLOADS).replace(os.sep, "/")
+    else:
+        rel_main = os.path.relpath(new_main, DOWNLOADS).replace(os.sep, "/")
     entry = {
         "rel_path": rel_main,
         "title": (title or _title_from_filename(os.path.basename(main_abs))),
@@ -3636,6 +3656,19 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
     subs = [e for e in (new_extras or []) if e.lower().endswith(SIDE_EXT)]
     if subs:
         entry["subtitle"] = subs[0]
+    # 按扩展名归类附加物：字幕(.srt/.vtt/.ass/.xml/.txt) 与 封面图(.jpg/.jpeg/.png/.webp)。
+    # 既支持 watcher 传入「视频+字幕+封面」三件套，也兼容老 import-dir（仅字幕）与
+    # /api/ingest（subtitle_path+cover）的既有调用——向后兼容，无传入则保持空。
+    IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+    SUB_EXTS = (".srt", ".vtt", ".ass", ".xml", ".txt")
+    _extras = list(new_extras or [])
+    sub_candidate = next((e for e in _extras if e.lower().endswith(SUB_EXTS)), "")
+    cover_candidate = next((e for e in _extras if e.lower().endswith(IMG_EXTS)), "")
+    entry["subtitle"] = sub_candidate
+    # subtitle_source：显式传入优先；否则有字幕即记为 official（平台/下载端字幕），无则空。
+    entry["subtitle_source"] = subtitle_source or ("official" if sub_candidate else "")
+    # 封面：显式传入优先；否则取池内同名封面图相对路径（相对 DOWNLOADS）。
+    entry["cover"] = cover or cover_candidate or ""
     _add_to_collection(owner, entry, target_cid)
     return rid, dedup_hit, rel_main
 
@@ -3643,7 +3676,7 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
 class IngestReq(BaseModel):
     user: str = ""
     rid: str
-    body_key8: str
+    body_key8: str = ""  # 兼容旧生产者；RM 现按内容哈希重算（见 /api/ingest，O3 治本）
     staged_path: str
     title: str = ""
     subtitle_path: str = ""
@@ -3655,16 +3688,22 @@ class IngestReq(BaseModel):
 def ingest(req: IngestReq, sid: str = Depends(current_identity)):
     """生产者统一入口：把已 staging 到本地的文件迁入资源池并登记引用。
 
-    入参（见 RM-实施指引 §2.1）：user / rid / body_key8 / staged_path / title / subtitle_path? / cover?。
-    rid、body_key8 由生产者（如下载器 / agent）按规范派生后传入。"""
+    入参（见 RM-实施指引 §2.1）：user / rid / staged_path / title / subtitle_path? / cover?。
+    rid 由生产者（如下载器 / agent）按规范派生后传入（资源级稳定主键，RM 尊重之）。
+    body_key8 不再由生产者决定：RM 按「文件内容哈希」派生（O3 治本，2026-10-20），
+    保证无论生产者如何命名，同内容必落同一子目录、入池即去重。传入的 body_key8 被忽略。"""
     owner = req.user or sid
-    if not req.rid or not req.body_key8 or not req.staged_path:
-        raise HTTPException(400, "rid / body_key8 / staged_path 均为必填")
+    if not req.rid or not req.staged_path:
+        raise HTTPException(400, "rid / staged_path 均为必填")
     if not os.path.isfile(req.staged_path):
         raise HTTPException(400, f"staged_path 不存在: {req.staged_path}")
+    # body_key8 由 RM 按内容哈希派生（覆盖生产者传入值），统一资源池去重语义
+    _h = _sha256_of_file(req.staged_path)
+    body_key8 = _body_key8_from_hash(_h)
     extras = [p for p in (req.subtitle_path, req.cover) if p and os.path.isfile(p)]
     rid, dedup_hit, rel = _ingest_into_pool(
-        owner, req.rid, req.body_key8, req.staged_path, extras, req.title, req.target_cid
+        owner, req.rid, body_key8, req.staged_path, extras, req.title, req.target_cid,
+        content_sha256=_h,
     )
     return {"ok": True, "rid": rid, "resource_id": rid, "dedup_hit": dedup_hit, "rel_path": rel}
 
@@ -3677,20 +3716,29 @@ class ImportDirReq(BaseModel):
 
 @app.post("/api/import-dir")
 def import_dir(req: ImportDirReq, sid: str = Depends(current_identity)):
-    """目录导入：遍历目录，按内容哈希派生 rid、按 (文件名|大小) 派生 body_key8，
-    复制（源目录原封不动）入资源池并登记引用。见 RM-实施指引 §2.3。"""
+    """目录导入：遍历目录，按内容哈希派生 rid、按内容派生（内容哈希 [16:24]）body_key8，
+    复制（源目录原封不动）入资源池并登记引用。见 RM-实施指引 §2.3。
+    body_key8 与文件名/大小无关，配合 _ingest_into_pool 的内容级去重保证同内容只存一份。
+
+    定位：本接口是「保留源的一次性运维/迁移工具」，用于从备份或外部目录批量迁入，
+    与 inbox watcher 的「移动·处理即清」自动通道分工不同。
+    ⚠️ 请勿对本服务的 inbox 目录（watcher 工作区）调用本接口——inbox 由 watcher 独占，
+    误用会扫到 .processing/.failed 半组或失败隔离文件，破坏自动导入的清洁性。"""
     owner = req.user or sid
     dp = req.dir_path
     if not os.path.isdir(dp):
         raise HTTPException(400, f"目录不存在: {dp}")
     media_files, side_files = [], []
-    for root, _dirs, fnames in os.walk(dp):
+    for root, dirs, fnames in os.walk(dp):
+        # 护栏：跳过 watcher 工作区，避免与 inbox watcher 冲突、读到半组或已隔离文件
+        dirs[:] = [d for d in dirs if d not in (".processing", ".failed")]
         for fn in fnames:
             ext = os.path.splitext(fn)[1].lower()
             fp = os.path.join(root, fn)
             if ext in MEDIA_EXT:
                 media_files.append(fp)
-            elif ext in SIDE_EXT:
+            elif ext in SIDE_EXT and not fn.endswith(".meta.json"):
+                # 排除 inbox watcher 的组锚文件，避免被当 sidecar 误传/污染资源池
                 side_files.append(fp)
     side_map = {os.path.basename(p): p for p in side_files}
     stage_dir = os.path.join(user_root(owner), "_staging")
@@ -3699,12 +3747,13 @@ def import_dir(req: ImportDirReq, sid: str = Depends(current_identity)):
     skipped = 0
     for mp in media_files:
         try:
-            size = os.path.getsize(mp)
-            rid = "r" + _sha256_of_file(mp)[:15]
+            h = _sha256_of_file(mp)
+            rid = "r" + h[:15]
         except OSError:
             skipped += 1
             continue
-        body_key8 = hashlib.sha256(f"{os.path.basename(mp)}|{size}".encode()).hexdigest()[:8]
+        body_key8 = _body_key8_from_hash(h)
+        content_sha256 = h
         # 复制语义：源目录不动，副本进 staging 再迁入池
         dest = _uniq_path(os.path.join(stage_dir, os.path.basename(mp)))
         try:
@@ -3713,11 +3762,33 @@ def import_dir(req: ImportDirReq, sid: str = Depends(current_identity)):
             skipped += 1
             continue
         stem = os.path.splitext(os.path.basename(mp))[0]
+        IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+        extras = []
+        # 复制语义：侧车（字幕 + 同名封面）也先拷进 staging，避免把源目录的侧车 move 走
         sub_fn = match_subtitle(stem, set(side_map.keys())) if side_map else ""
-        extras = [side_map[sub_fn]] if sub_fn else []
+        if sub_fn:
+            sub_src = side_map[sub_fn]
+            sub_dest = _uniq_path(os.path.join(stage_dir, os.path.basename(sub_src)))
+            try:
+                shutil.copy2(sub_src, sub_dest)
+                extras.append(sub_dest)
+            except OSError:
+                pass
+        # 同名封面（与视频同 stem，扩展名在 IMG_EXTS）——与 watcher 的 B2 封面入库保持一致
+        cover_fn = next((fn for fn in side_map
+                         if fn in {stem + e for e in IMG_EXTS}), None)
+        if cover_fn:
+            cover_src = side_map[cover_fn]
+            cover_dest = _uniq_path(os.path.join(stage_dir, os.path.basename(cover_src)))
+            try:
+                shutil.copy2(cover_src, cover_dest)
+                extras.append(cover_dest)
+            except OSError:
+                pass
         try:
             _ingest_into_pool(owner, rid, body_key8, dest, extras,
-                              _title_from_filename(mp), target_cid=req.target_cid)
+                              _title_from_filename(mp), target_cid=req.target_cid,
+                              content_sha256=content_sha256)
             added += 1
         except HTTPException:
             skipped += 1
@@ -3726,4 +3797,7 @@ def import_dir(req: ImportDirReq, sid: str = Depends(current_identity)):
 
 if __name__ == "__main__":
     import uvicorn
+    # 直接 python app.py 启动时也拉起 inbox watcher（run_server.py 已含，import 本模块时不重复执行）
+    import inbox_watcher
+    inbox_watcher.start_inbox_watcher()
     uvicorn.run(app, host=cfg["host"], port=cfg["port"], log_level="info")
