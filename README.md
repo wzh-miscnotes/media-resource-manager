@@ -98,3 +98,13 @@ media-resource-manager/
 
 - `docs/资源池与回收站设计.md`：资源池布局、回收站、per-user 共享的设计细节。
 - `docs/字幕OCR方案.md`：硬字幕 OCR（olmOCR）接入方案。
+
+## License
+
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+本项目以 **Apache License 2.0** 开源，详见 [LICENSE](LICENSE)。
+
+- 你可以使用、修改、分发本项目，包括用于商业用途，需保留版权与许可证声明。
+- Apache-2.0 包含明确的专利授权条款与专利报复终止条款，对下游使用者与贡献者更友好。
+- 若你基于本项目二次开发并分发，请提供 NOTICE（如有）并保留原始许可证文件。
