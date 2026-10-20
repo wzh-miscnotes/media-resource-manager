@@ -753,7 +753,7 @@ def remove_trash_entry(rid):
         _save_collections()
 
 def _first_bili_sub(extras):
-    """从附加文件列表中挑出 视频平台字幕 TXT 的相对路径。"""
+    """从附加文件列表中挑出官方字幕 TXT 的相对路径。"""
     if not extras:
         return ""
     for e in extras:
@@ -791,7 +791,7 @@ def _auto_collect_into_library(sid, req, main_path, extras):
 def strip_bracket_suffix(stem):
     """剥掉文件名主干尾部的方括号标记（如 ' [BVxxxxxx]'、' [BVxxxxxx]'）。
 
-    背景：视频名由 yt-dlp outtmpl 生成，尾部带 [BV号]；而 视频平台字幕由
+    背景：视频名由下载工具 outtmpl 生成，尾部带 [BV号]；而平台字幕由
     fetch_and_save_subtitle_txt 用清理后的标题生成，不带该标记。
     两者主干因此天然不一致，配对前必须先剥掉这个尾巴。
     """
@@ -845,7 +845,7 @@ def match_subtitle(stem, filename_set):
 
 def _subtitle_srt_rel(subtitle_rel):
     """由字幕 TXT 相对路径推导同名 .srt 相对路径；仅当该 .srt 真实存在时返回，否则返回 ""。
-    用于前端「下载 SRT（带时间轴）」入口——.srt 由 视频平台字幕/OCR 落盘时一并写出。"""
+    用于前端「下载 SRT（带时间轴）」入口——.srt 由平台字幕/OCR 落盘时一并写出。"""
     if not subtitle_rel or not subtitle_rel.endswith(".txt"):
         return ""
     srt_rel = subtitle_rel[:-4] + ".srt"
@@ -909,29 +909,6 @@ def _find_existing_copy(rel_path, vid="", title=""):
 
     hits.sort(key=_score)
     return hits[0]
-
-_YTDLP_DL_RESILIENCE = [
-    "--socket-timeout", "60",
-    "--retries", "5",
-    "--fragment-retries", "5",
-    "--file-access-retries", "3",
-    "--continue",
-    "--concurrent-fragments", "3",
-    "--throttled-rate", "100K",
-    "--buffer-size", "16K",
-    "--add-header", "Referer:https://www.example.com",
-]
-
-_YTDLP_FETCH_RESILIENCE = [
-    "--socket-timeout", "60",
-    "--retries", "5",
-    "--fragment-retries", "5",
-    "--add-header", "Referer:https://www.example.com",
-]
-
-_login_check_cache = {"cookie_hash": "", "result": None, "ts": 0.0}
-
-_LOGIN_CHECK_TTL = 120  # 秒
 
 tasks: "OrderedDict[str, dict]" = OrderedDict()
 
@@ -1022,22 +999,7 @@ def fetch_thumbnail_local(thumbnail_url: str) -> str | None:
         print(f"[thumbnail] 下载失败: {_ex}", file=sys.stderr, flush=True)
         return None
 
-SESSIONS: "dict[str, dict]" = {}  # sid -> {content, login, time}（仅内存、不落盘）
-
-SESSIONS: "dict[str, dict]" = {}   # sid -> {"content": str, "login": bool, "time": float}
-
-DEFAULT_BATCH_CONFIG = {
-    "delay_base": 5.0,          # 每集之间的基础间隔（秒）
-    "delay_jitter": 3.0,        # 随机抖动范围 ±N 秒（实际间隔 = base + random(-jitter, +jitter)）
-    "max_retries": 2,           # 单集失败后自动重试次数
-    "retry_delay": 10.0,        # 重试前的等待时间（秒）
-    "user_agents": [            # 可轮换的 User-Agent 池
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
-    ],
-}
+SESSIONS: "dict[str, dict]" = {}   # sid -> {"content": str, "login": bool, "time": float}（仅内存、不落盘）
 
 
 def resolve_ffmpeg() -> str:
@@ -1064,17 +1026,6 @@ def resolve_ffmpeg() -> str:
     except Exception:
         pass
     return ""  # 彻底找不到，调用方据此决定是否传 --ffmpeg-location
-
-_MIXIN_KEY_ENC_TAB = [
-    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
-    27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
-    37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
-    22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
-]
-
-_wbi_keys_cache = {"img_key": None, "sub_key": None, "ts": 0.0}
-
-_WBI_KEY_TTL = 3600  # 密钥缓存 1 小时（视频平台实际可能更久才轮换）
 
 import urllib.parse
 
@@ -1180,7 +1131,7 @@ def serve_thumbnail_cache(name: str):
     path = os.path.abspath(path)
     if not path.startswith(os.path.abspath(THUMBNAIL_CACHE_DIR)) or not os.path.isfile(path):
         raise HTTPException(404, "封面缓存不存在")
-    return FileResponse(path, media_type="image/webp")  # 大多数 视频平台封面是 webp
+    return FileResponse(path, media_type="image/webp")  # 多数平台封面为 webp
 
 class CollectionReq(BaseModel):
     name: str = ""
@@ -2905,7 +2856,7 @@ def _generate_ocr_subtitle(video_path: str, out_dir: str, log_cb, title_hint: st
         return None, None, "empty"
     # 5) 写 SRT + TXT
     # 用「视频主干 + _字幕」的规范命名，使媒体库/字幕转文章/下载列表等既有链路
-    # 能直接识别这份 OCR 字幕（与 视频平台字幕 fetch_and_save_subtitle_txt 的命名一致）。
+    # 能直接识别这份 OCR 字幕（与官方字幕落盘时的命名一致）。
     base = _safe_fname_title(title_hint or os.path.basename(out_dir))
     srt_path = os.path.join(out_dir, f"{base}_字幕.srt")
     txt_path = os.path.join(out_dir, f"{base}_字幕.txt")
@@ -2919,8 +2870,8 @@ def _generate_ocr_subtitle(video_path: str, out_dir: str, log_cb, title_hint: st
             ms = 999
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-    # ⚠ 覆盖前先备份：视频平台官方字幕与 OCR 字幕共用「{标题}_字幕.txt」命名，
-    #   直接覆盖会让原字幕不可逆丢失（尤其首次把 视频平台字幕换成内嵌 OCR 的场景）。
+    # ⚠ 覆盖前先备份：官方字幕与 OCR 字幕共用「{标题}_字幕.txt」命名，
+    #   直接覆盖会让原字幕不可逆丢失（尤其首次把官方字幕换成内嵌 OCR 的场景）。
     for _p in (srt_path, txt_path):
         if os.path.isfile(_p):
             try:
@@ -2958,9 +2909,9 @@ def ocr_subtitle(req: OcrSubtitleReq, sid: str = Depends(current_identity)):
     rel = item.get("rel_path", "")
     if not rel or not os.path.isfile(os.path.join(DOWNLOADS, rel)):
         raise HTTPException(400, "视频文件不存在或已失效（请先重新下载）")
-    # 护栏：已有 视频平台官方字幕的视频不允许用 OCR 覆盖（OCR 质量≤官方字幕，且会改动 .bak 备份指向）
+    # 护栏：已有官方字幕的视频不允许用 OCR 覆盖（OCR 质量≤官方字幕，且会改动 .bak 备份指向）
     if item.get("subtitle_source") == "official":
-        raise HTTPException(409, "该视频已有 视频平台官方字幕，不支持用 OCR 覆盖（如需替换为 OCR 字幕，请先删除原字幕再重试）")
+        raise HTTPException(409, "该视频已有官方字幕，不支持用 OCR 覆盖（如需替换为 OCR 字幕，请先删除原字幕再重试）")
     if not LLM_BASE_URL:
         raise HTTPException(500, "服务端未配置模型地址（llm_base_url）")
     task_id = uuid.uuid4().hex[:16]
