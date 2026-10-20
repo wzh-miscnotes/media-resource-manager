@@ -918,8 +918,6 @@ THUMBNAIL_CACHE_DIR = cfg["thumbnail_cache_dir"]
 
 os.makedirs(THUMBNAIL_CACHE_DIR, exist_ok=True)
 
-_thumb_cache_lock = threading.Lock()
-
 FNAME_TITLE_MAX = 50
 
 def _safe_fname_title(title: str, max_chars: int = FNAME_TITLE_MAX) -> str:
@@ -957,47 +955,6 @@ def _uniq_path(path: str) -> str:
             return cand
         i += 1
 
-def fetch_thumbnail_local(thumbnail_url: str) -> str | None:
-    """将远程封面下载到本地缓存，返回本地文件名（不含路径），失败返回 None。
-
-    返回值可直接通过 /api/thumbnail-cache/{name} 访问。
-    """
-    if not thumbnail_url:
-        return None
-    # 用 URL hash 做缓存 key（同一视频多次解析不重复下载）
-    import hashlib
-    url_hash = hashlib.md5(thumbnail_url.encode()).hexdigest()[:12]
-    # 从 URL 推断扩展名
-    ext = ".webp"
-    for e in (".jpg", ".jpeg", ".png", ".webp"):
-        if e in thumbnail_url.lower().split("?")[0]:
-            ext = e
-            break
-    cache_name = f"{url_hash}{ext}"
-    cache_path = os.path.join(THUMBNAIL_CACHE_DIR, cache_name)
-
-    # 已缓存则跳过下载
-    if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 0:
-        return cache_name
-
-    try:
-        import urllib.request as _urllib
-        req = _urllib.Request(thumbnail_url, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; MediaResourceManager/1.0)",
-            "Referer": "https://www.example.com/",
-        })
-        with _urllib.urlopen(req, timeout=10) as resp:
-            data = resp.read()
-        if len(data) < 500:  # 太小可能是错误页/占位图
-            return None
-        with _thumb_cache_lock:
-            with open(cache_path, "wb") as f:
-                f.write(data)
-        return cache_name
-    except Exception as _ex:
-        import sys
-        print(f"[thumbnail] 下载失败: {_ex}", file=sys.stderr, flush=True)
-        return None
 
 SESSIONS: "dict[str, dict]" = {}   # sid -> {"content": str, "login": bool, "time": float}（仅内存、不落盘）
 
