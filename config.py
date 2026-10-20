@@ -64,6 +64,11 @@ DEFAULTS = {
     "llm_timeout": 300,
     # ---- 身份模式（见模块 docstring）----
     "auth_mode": "auto",           # "auto" | "gateway" | "standalone"
+    # ---- inbox watcher（方案 A 投递目录自动导入）----
+    "RM_INBOX_DIR": "/app/inbox",            # 投递目录（容器内路径）
+    "RM_INBOX_POLL_SEC": 10,                 # 扫描间隔（秒）
+    "RM_INBOX_DEFAULT_OWNER": "admin@local", # meta 缺失时的兜底 owner
+    "RM_INBOX_MAX_RETRY": 5,                 # 同组失败重试上限，超过移 .failed/
 }
 
 # 环境变量名映射（统一前缀 RM_，避免与系统变量冲突）
@@ -79,6 +84,11 @@ ENV_MAP = {
     "llm_model": "RM_LLM_MODEL",
     "llm_timeout": "RM_LLM_TIMEOUT",
     "auth_mode": "RM_AUTH_MODE",
+    # ---- inbox watcher ----
+    "RM_INBOX_DIR": "RM_INBOX_DIR",
+    "RM_INBOX_POLL_SEC": "RM_INBOX_POLL_SEC",
+    "RM_INBOX_DEFAULT_OWNER": "RM_INBOX_DEFAULT_OWNER",
+    "RM_INBOX_MAX_RETRY": "RM_INBOX_MAX_RETRY",
 }
 
 # ---- 机密项：只认环境变量，绝不从 config.json 读取（config.json 可能被误提交）----
@@ -109,7 +119,7 @@ def load_config() -> dict:
     for k, env in ENV_MAP.items():
         val = os.environ.get(env)
         if val:
-            if k in ("port", "llm_timeout"):
+            if k in ("port", "llm_timeout", "RM_INBOX_POLL_SEC", "RM_INBOX_MAX_RETRY"):
                 try:
                     val = int(val)
                 except ValueError:
