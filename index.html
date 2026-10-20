@@ -1056,16 +1056,16 @@ async function renderLibGrid(){
     const dur = it.duration ? `<span>${fmtDur(it.duration)}</span>` : "";
     const stale = it.stale ? `<span class="stale">文件缺失</span>` : "";
     const _src = it.subtitle_source || "";
-    // 官方字幕：随视频一并落盘的字幕文件（subtitle_source="official"）或显式标记 "official"。
+    // 官方字幕：随视频一并落盘的字幕文件，或显式标记为 "official"。
     // 这类字幕质量已够，OCR 覆盖只会降级且改变 .bak 指向，故默认隐藏「重新识别」入口。
-    const isOfficial = (_src === "official" || _src === "official");
+    const isOfficial = (_src === "official");
     const subTag = it.subtitle ? `<span class="${_src==="ocr"?"tag-ocr":isOfficial?"tag-official":""}">${_src==="ocr"?"OCR字幕":isOfficial?"官方字幕":"有字幕"}</span>` : "";
     const checked = _sel.has(it.rel_path) ? "checked" : "";
     const picked = _sel.has(it.rel_path) ? " picked" : "";
     // 内嵌硬字幕（字幕条 OCR）入口 —— 仅自己的视频：
     //  · 无字幕            → 「🔤 识别内嵌字幕」
     //  · 已有 OCR 字幕     → 「🔄 重新识别」（用当前档位重跑并覆盖）
-    //  · 已有官方字幕（subtitle_source="official"/"official"）→ 隐藏 OCR 按钮
+    //  · 已有官方字幕（subtitle_source="official"）→ 隐藏 OCR 按钮
     //  · 共享视频          → 隐藏
     // 纵向位置：与「✍️ 文章」错开（有字幕时两者并存 → 76px）
     // 注：artBtn / arts / artBlock 已在上方（isShared 之前）统一定义，此处两个分支共用，不再重复声明

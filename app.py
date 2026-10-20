@@ -519,7 +519,7 @@ def _entry_dedup_key(entry):
     用于识别「同一集视频被重下到不同任务目录」——此时 rel_path 不同，
     只按路径去重会失效、导致媒体库条目翻倍（19 个文件显示 38 个视频）。
     - 序号取文件名前缀（如 `008 【2026首发】...` → `008`）用于区分分P；
-      ⚠️ 不能用文件名里的 `_pN` 后缀：yt-dlp 不同批次可能写 `[BVxxxxxx]` 也可能写
+      ⚠️ 不能用文件名里的 `_pN` 后缀：下载工具不同批次可能写 `[BVxxxxxx]` 也可能写
       `[BVxxxxxx_p8]`，不稳定，会让「第1集」和「第8集」被误判为同一条。
     - 三者都取不到时返回 None，该条目不参与聚合（保守保留，不做删除）。
     """
@@ -678,7 +678,7 @@ def _add_to_collection(sid, entry, target_cid="default"):
         pass
 
 def _title_from_filename(fname: str) -> str:
-    """从 yt-dlp 产物文件名还原展示标题（去掉 ` [BVxxxxxx].mp4` 后缀）。"""
+    """从下载工具产物文件名还原展示标题（去掉 ` [BVxxxxxx].mp4` 后缀）。"""
     name = os.path.splitext(fname)[0]
     name = re.sub(r"\s*\[[A-Za-z0-9_-]+\]\s*$", "", name)
     return name.strip() or fname
@@ -766,7 +766,7 @@ def _auto_collect_into_library(sid, req, main_path, extras):
 
     ⚠️ 单集下载的【两条】路径都必须调用，否则会出现「视频文件已就位、
     媒体库里却看不到」：
-      1) 正常 yt-dlp 下载完成（函数末尾）；
+      1) 正常下载工具下载完成（函数末尾）；
       2) 「命中视频本体缓存」的早退分支（直接复用缓存文件后 return）——
          曾经漏掉这一条，表现为「跳过重复下载后默认合集没增加视频」。
     """
@@ -806,7 +806,7 @@ def normalize_stem(stem):
     """归一化主干：先剥尾部 [BV号]，再去开头的分P序号前缀（'001 ' / '043 ' / 'NA '）。
 
     背景：批量下载用 outtmpl '%(playlist_index)03d %(title).50s [%(id)s]'，
-    分P序号解析失败时 yt-dlp 会填 'NA'；而字幕名不带任何序号前缀。
+    分P序号解析失败时下载工具会填 'NA'；而字幕名不带任何序号前缀。
     归一化后才能跨这两种命名对齐。
     """
     s = strip_bracket_suffix(stem)
