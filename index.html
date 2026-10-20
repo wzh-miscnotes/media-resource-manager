@@ -191,6 +191,18 @@
     display:flex;flex-direction:column}
   .modal-head{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}
   .modal-head .mt{font-size:15px;font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* 独立用户模块：登录 / 用户管理 */
+  .auth-inp{padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;
+    width:100%;box-sizing:border-box;outline:none}
+  .auth-inp:focus{border-color:var(--primary)}
+  .auth-err{color:#c0392b;font-size:12.5px;min-height:16px}
+  .auth-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;font-size:12.5px;color:var(--sub)}
+  .auth-bar .who{font-weight:600;color:var(--text)}
+  .ua-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line);
+    border-radius:10px;margin-bottom:8px;font-size:13px}
+  .ua-row .u{flex:1;min-width:0;font-weight:600}
+  .ua-row .i{color:var(--sub);font-size:12px}
+  .tag-admin{background:#eef1f6;color:var(--sub);border-radius:6px;padding:1px 6px;font-size:11px;margin-left:6px}
   .modal-body{display:flex;gap:0;min-height:0;flex:1;align-items:stretch}
   /* 左栏整列可滚：视频下方可挂「AI 文章 / 字幕原文」折叠区，右侧播放列表不受影响 */
   .player-col{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;overflow-y:auto}
@@ -442,6 +454,13 @@
   <header data-page-node-id="hnFdsblfAmvHaTh5cByKt7">
     <h1 data-page-node-id="ck3O60sZVogA0XRb101nS3">媒体资源库</h1>
     <p data-page-node-id="7YFfDazLut7IshbFAnhrXY">统一管理本地视频、字幕、封面与文章；支持上传、目录导入、共享与回收站保护。</p>
+    <!-- 身份栏：standalone 模式显示当前登录身份 / 用户管理 / 登出；其余模式隐藏 -->
+    <div class="auth-bar hidden" id="authBar">
+      <span>当前身份 <span class="who" id="authWho"></span></span>
+      <span class="muted" id="authMode"></span>
+      <button class="btn-ghost btn-sm hidden" id="btnUserAdmin" onclick="openUserAdmin()">👥 用户管理</button>
+      <button class="btn-ghost btn-sm hidden" id="btnLogout" onclick="doLogout()">登出</button>
+    </div>
   </header>
 
   <nav class="tabs" data-page-node-id="IYCUae5uq6ZGMaD6HPyIyU">
@@ -793,6 +812,50 @@
   </div>
 </div>
 
+<!-- ============ 独立用户模块（仅 auth_mode=standalone 时启用）============ -->
+<!-- 登录框：bootstrap 返回 login_required 时自动弹出，未登录前不加载媒体库 -->
+<div class="modal-mask hidden" id="loginMask">
+  <div class="modal" style="width:min(420px,96vw)">
+    <div class="modal-head">
+      <div class="mt">🔐 登录资源库</div>
+    </div>
+    <div class="modal-body" style="flex-direction:column;padding:16px 18px;gap:12px">
+      <div class="muted" style="font-size:12.5px">
+        当前为 <b>standalone</b> 模式：身份由资源库自身账号体系提供（网关注入的身份头不被采信）。
+      </div>
+      <input class="auth-inp" id="loginUser" placeholder="用户名" autocomplete="username">
+      <input class="auth-inp" id="loginPw" type="password" placeholder="密码" autocomplete="current-password">
+      <div class="auth-err" id="loginErr"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn-ghost btn-sm" onclick="doLogin()">登录</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 用户管理：仅 admin 可见（身份串 == admin@local） -->
+<div class="modal-mask hidden" id="userAdminMask" onclick="if(event.target===this)closeUserAdmin()">
+  <div class="modal" style="width:min(680px,96vw)">
+    <div class="modal-head">
+      <div class="mt">👥 用户管理（admin）</div>
+      <button class="btn-ghost btn-sm" onclick="closeUserAdmin()">关闭</button>
+    </div>
+    <div class="modal-body" style="flex-direction:column;padding:16px 18px;gap:12px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input class="auth-inp" id="newUser" placeholder="新用户名（自动补 @local）" style="flex:1;min-width:170px">
+        <input class="auth-inp" id="newPw" placeholder="初始密码（留空则随机生成）" style="flex:1;min-width:170px">
+        <button class="btn-ghost btn-sm" onclick="adminCreateUser()">＋ 新增用户</button>
+      </div>
+      <div class="muted" style="font-size:12px">
+        用户名会自动归一化成 <code>&lt;名&gt;@local</code>，与网关时代的存储键对齐——
+        同名用户可直接取回历史数据；<b>删除账号不会删除其资源</b>（重建同名账号即可取回）。
+      </div>
+      <div class="auth-err" id="userAdminErr"></div>
+      <div id="userAdminList" style="max-height:46vh;overflow-y:auto"></div>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = s => document.querySelector(s);
 let currentUrl = "", currentQualities = [], selectedQuality = null,
@@ -855,7 +918,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // 新标签播放页：/?play=1&coll=..&i=.. 直接进入独立播放模式
   if(_playFromQuery()){ initPlayMode(); return; }
   // 提前加载一次合集列表，供合集下拉使用
-  loadLibrary();
+  // standalone 且未登录时由 initAuth 弹登录框、暂不加载（避免 403 空库）
+  initAuth();
 
 });
 
@@ -2992,6 +3056,136 @@ async function doImportDir(){
     else { msg.textContent = "导入失败：" + (d.detail || d.error || "未知错误"); }
   }catch(e){ msg.textContent = "请求出错：" + e.message; }
   finally{ btn.disabled = false; }
+}
+
+/* ==================== 身份与独立用户模块（auth_mode） ====================
+   gateway    : 身份由网关注入，前端无需登录（维持原行为）。
+   standalone : bootstrap 返回 login_required 时弹登录框，登录后凭会话 cookie 取身份；
+                admin 额外显示「用户管理」。
+   auto       : 维持原行为，身份栏仅做展示。
+   所有模式共用：身份串一律 <名>@local，保证存储键对齐、切换无损。 */
+let _auth = { auth_mode: "auto", identity: null, is_admin: false, login_required: false };
+
+async function initAuth(){
+  try{
+    const r = await fetch("/api/bootstrap");
+    if(r.ok) _auth = Object.assign(_auth, await r.json());
+  }catch(e){ /* 取不到就按默认继续，不阻塞原有流程 */ }
+  renderAuthBar();
+  if(_auth.login_required){
+    document.getElementById("loginMask").classList.remove("hidden");
+    return;                    // 未登录：不加载媒体库
+  }
+  loadLibrary();
+}
+
+function renderAuthBar(){
+  const bar = document.getElementById("authBar");
+  if(!bar) return;
+  const st = _auth.auth_mode === "standalone";
+  if(!_auth.identity){ bar.classList.add("hidden"); return; }
+  bar.classList.remove("hidden");
+  document.getElementById("authWho").textContent = _auth.identity;
+  const label = { gateway:"网关模式（身份由网关注入）",
+                  auto:"自动模式（网关优先，退回会话）",
+                  standalone:"独立模式（资源库自管账号）" }[_auth.auth_mode] || _auth.auth_mode;
+  document.getElementById("authMode").textContent = label;
+  // 用户管理只在「独立模式 + admin」下有意义（网关模式账号在网关侧管理）
+  document.getElementById("btnUserAdmin").classList.toggle("hidden", !(st && _auth.is_admin));
+  document.getElementById("btnLogout").classList.toggle("hidden", !st);
+}
+
+async function doLogin(){
+  const u = (document.getElementById("loginUser").value || "").trim();
+  const p = document.getElementById("loginPw").value || "";
+  const err = document.getElementById("loginErr");
+  err.textContent = "";
+  if(!u || !p){ err.textContent = "请填写用户名和密码"; return; }
+  try{
+    const r = await fetch("/api/login", { method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ username:u, password:p }) });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok){ err.textContent = (j && j.detail) || "登录失败"; return; }
+    document.getElementById("loginMask").classList.add("hidden");
+    document.getElementById("loginPw").value = "";
+    _auth.identity = j.identity; _auth.is_admin = j.is_admin; _auth.login_required = false;
+    renderAuthBar();
+    loadLibrary();
+  }catch(e){ err.textContent = "登录请求失败：" + e; }
+}
+
+async function doLogout(){
+  await fetch("/api/logout", { method:"POST" }).catch(()=>{});
+  _auth.identity = null; _auth.is_admin = false; _auth.login_required = true;
+  renderAuthBar();
+  document.getElementById("loginMask").classList.remove("hidden");
+}
+
+function openUserAdmin(){
+  document.getElementById("userAdminMask").classList.remove("hidden");
+  document.getElementById("userAdminErr").textContent = "";
+  loadUserAdmin();
+}
+function closeUserAdmin(){ document.getElementById("userAdminMask").classList.add("hidden"); }
+
+async function loadUserAdmin(){
+  const box = document.getElementById("userAdminList");
+  box.innerHTML = '<div class="muted">加载中…</div>';
+  try{
+    const r = await fetch("/api/admin/users");
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok){ box.innerHTML = '<div class="auth-err">' + esc((j && j.detail) || "加载失败") + '</div>'; return; }
+    const us = j.users || [];
+    if(!us.length){ box.innerHTML = '<div class="muted">暂无用户</div>'; return; }
+    box.innerHTML = us.map(u =>
+      '<div class="ua-row">'
+      + '<span class="u">' + esc(u.username)
+      + (u.role === "admin" ? '<span class="tag-admin">admin</span>' : '') + '</span>'
+      + '<span class="i">' + esc(u.identity) + '</span>'
+      + (u.role === "admin" ? ''
+         : '<button class="btn-ghost btn-sm" onclick="adminResetUser(' + JSON.stringify(u.username) + ')">重置密码</button>'
+           + '<button class="btn-ghost btn-sm" onclick="adminDeleteUser(' + JSON.stringify(u.username) + ')">删除</button>')
+      + '</div>').join("");
+  }catch(e){ box.innerHTML = '<div class="auth-err">' + esc(String(e)) + '</div>'; }
+}
+
+async function adminCreateUser(){
+  const u = (document.getElementById("newUser").value || "").trim();
+  const p = (document.getElementById("newPw").value || "").trim();
+  const err = document.getElementById("userAdminErr");
+  err.textContent = "";
+  if(!u){ err.textContent = "请填写用户名"; return; }
+  try{
+    const r = await fetch("/api/admin/users", { method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ username:u, password:p }) });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok){ err.textContent = (j && j.detail) || "创建失败"; return; }
+    document.getElementById("newUser").value = "";
+    document.getElementById("newPw").value = "";
+    loadUserAdmin();
+    alert("已创建用户 " + j.username + "（身份 " + j.identity + "）\n初始密码：" + j.password);
+  }catch(e){ err.textContent = String(e); }
+}
+
+async function adminResetUser(u){
+  const p = prompt("为「" + u + "」设置新密码（留空则随机生成）：", "");
+  if(p === null) return;
+  const r = await fetch("/api/admin/users/" + encodeURIComponent(u) + "/reset", { method:"POST",
+    headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ password:p }) });
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok){ alert((j && j.detail) || "重置失败"); return; }
+  loadUserAdmin();
+  alert("已重置，新密码：" + j.password);
+}
+
+async function adminDeleteUser(u){
+  if(!confirm("删除账号「" + u + "」？\n注意：只删登录账号，其资源仍保留（重建同名账号即可取回）。")) return;
+  const r = await fetch("/api/admin/users/" + encodeURIComponent(u), { method:"DELETE" });
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok){ alert((j && j.detail) || "删除失败"); return; }
+  loadUserAdmin();
 }
 </script>
 </body>

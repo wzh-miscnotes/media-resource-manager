@@ -25,6 +25,23 @@ llm_api_key          模型服务密钥。⚠️ 严禁写入本文件或 config
                      请写 config.json（已 gitignore）或设环境变量 RM_LLM_API_KEY。
 llm_model            默认模型 id。
 llm_timeout          单次生成超时秒数，默认 300（长文较慢）。
+
+身份模式（决定用户从哪来）
+------------------------
+auth_mode            "gateway"    ：只采信可信代理（TRUSTED_PROXY_NETS）注入的 X-User-Email。
+                                    RM 不存密码、不引导 admin——用户全在网关侧管理。
+                     "standalone" ：启用 RM 自带用户模块（admin 引导 + 登录 + 用户管理），
+                                    完全脱离网关也能跑；不认 X-User-Email。
+                     "auto"（默认）：现状——可信 email > X-Session-Id > 匿名。
+                                    不破现有部署，也是两种形态间的过渡桥。
+
+⚠️ 切换 auth_mode 不需要迁移数据：数据只按「身份字符串」键存，无 auth_mode 痕迹。
+   无损切换的唯一前提：独立模式账号一律归一化为 <用户名>@local，让身份串与网关时代一致。
+
+以下三项**仅从环境变量读取**，绝不允许出现在 config.json（避免误提交）：
+RM_ADMIN_USER        admin 账号名，默认 admin（实际身份串 = <名>@local）。
+RM_ADMIN_PASSWORD    首次启动引导 admin 用的密码；未设则自动生成随机密码并打印到日志。
+RM_SECRET            会话 cookie 签名密钥；未设则每次启动随机生成（重启即登出）。
 """
 import os
 import json
@@ -45,6 +62,8 @@ DEFAULTS = {
     "llm_api_key": "",             # 见模块 docstring：只放 config.json / 环境变量
     "llm_model": "qwen/qwen3.6-35b-a3b",
     "llm_timeout": 300,
+    # ---- 身份模式（见模块 docstring）----
+    "auth_mode": "auto",           # "auto" | "gateway" | "standalone"
 }
 
 # 环境变量名映射（统一前缀 RM_，避免与系统变量冲突）
@@ -59,7 +78,13 @@ ENV_MAP = {
     "llm_api_key": "RM_LLM_API_KEY",
     "llm_model": "RM_LLM_MODEL",
     "llm_timeout": "RM_LLM_TIMEOUT",
+    "auth_mode": "RM_AUTH_MODE",
 }
+
+# ---- 机密项：只认环境变量，绝不从 config.json 读取（config.json 可能被误提交）----
+ADMIN_USER = (os.environ.get("RM_ADMIN_USER") or "admin").strip() or "admin"      # 身份串 = <名>@local
+ADMIN_PASSWORD = (os.environ.get("RM_ADMIN_PASSWORD") or "").strip()              # 空 = 首启自动生成
+SECRET = (os.environ.get("RM_SECRET") or "").strip()                              # 空 = 启动时随机生成
 
 
 def _load_json() -> dict:

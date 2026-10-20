@@ -32,6 +32,12 @@ import selectors
 
 import hashlib
 
+import hmac
+
+import secrets
+
+import base64
+
 import zipfile
 
 import ipaddress
@@ -46,13 +52,140 @@ from pydantic import BaseModel
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
-from config import cfg
+from config import cfg, ADMIN_USER, ADMIN_PASSWORD, SECRET
 
 BIN = cfg["bin_dir"]                       # 内含 ffmpeg.exe（可选，缺省走三级回退）
 
 DOWNLOADS = cfg["downloads_dir"]
 
 os.makedirs(DOWNLOADS, exist_ok=True)
+
+# ==================== 身份模式（auth_mode）与独立用户模块 ====================
+# gateway    : 只采信可信代理注入的 X-User-Email，RM 不存密码、不引导 admin。
+# standalone : RM 自带账号体系（admin 引导 + 登录 + 用户管理），脱离网关可独立跑。
+# auto（默认）: 现状（可信 email > X-Session-Id > 匿名），也是两形态间的过渡桥。
+AUTH_MODE = (cfg.get("auth_mode") or "auto").strip().lower()
+if AUTH_MODE not in ("auto", "gateway", "standalone"):
+    print("[auth] 未知的 auth_mode=%r，回退 auto" % cfg.get("auth_mode"), flush=True)
+    AUTH_MODE = "auto"
+
+# 账号存储：落在 downloads/users/ 下（该目录已 gitignore），绝不进 config.json
+ACCOUNTS_DIR = os.path.join(DOWNLOADS, "users")
+ADMIN_FILE = os.path.join(ACCOUNTS_DIR, ".admin.json")
+ACCOUNTS_FILE = os.path.join(ACCOUNTS_DIR, ".accounts.json")
+
+# 会话签名密钥：未设 RM_SECRET 则每次启动随机生成（重启即登出，安全默认）
+_SIGN_SECRET = SECRET or secrets.token_hex(32)
+
+
+def normalize_identity(name: str) -> str:
+    """账号名 -> 身份字符串，一律归一化为 <name>@local。
+
+    ⚠️ 这是「网关 / 独立双向无损切换」的硬前提：网关注入的身份形如 <name>@local，
+    独立模式必须产出**完全相同**的字符串，user_hash 与 collections 键才能对齐；
+    否则身份漂移 → 库显示为空（数据仍在磁盘，只是够不着）。
+    """
+    n = (name or "").strip()
+    if not n:
+        return ""
+    return n if "@" in n else n + "@local"
+
+
+def _pw_hash(password: str, salt: bytes = None) -> str:
+    """口令哈希：stdlib pbkdf2_hmac（不引 bcrypt，避开原生编译依赖）。"""
+    if salt is None:
+        salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100000)
+    return "pbkdf2$%s$%s" % (salt.hex(), dk.hex())
+
+
+def _pw_verify(password: str, stored: str) -> bool:
+    """校验口令（恒定时间比较）。"""
+    try:
+        algo, salt_hex, dk_hex = (stored or "").split("$")
+        if algo != "pbkdf2":
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                 bytes.fromhex(salt_hex), 100000)
+        return hmac.compare_digest(dk.hex(), dk_hex)
+    except Exception:
+        return False
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _load_admin():
+    return _read_json(ADMIN_FILE)
+
+
+def _load_accounts():
+    return _read_json(ACCOUNTS_FILE)
+
+
+def _sign(value: str) -> str:
+    """会话值签名（HMAC-SHA256），返回 <b64(value)>.<mac>。"""
+    mac = hmac.new(_SIGN_SECRET.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
+    return "%s.%s" % (base64.urlsafe_b64encode(value.encode("utf-8")).decode().rstrip("="), mac)
+
+
+def _unsign(token: str):
+    """校验签名并还原原值；失败返回 None。"""
+    try:
+        raw, mac = (token or "").rsplit(".", 1)
+        pad = "=" * (-len(raw) % 4)
+        value = base64.urlsafe_b64decode(raw + pad).decode("utf-8")
+        expect = hmac.new(_SIGN_SECRET.encode("utf-8"), value.encode("utf-8"),
+                          hashlib.sha256).hexdigest()
+        return value if hmac.compare_digest(expect, mac) else None
+    except Exception:
+        return None
+
+
+def ensure_admin():
+    """standalone 首次启动引导 admin 账号。
+
+    已有 .admin.json → 跳过；否则用 RM_ADMIN_PASSWORD 建，
+    env 未设则自动生成随机密码打印到日志（绝不空密码裸奔）。
+    gateway / auto 模式不执行——那些模式下用户由网关或请求头提供。
+    """
+    if AUTH_MODE != "standalone":
+        return
+    d = _load_admin()
+    if d.get("username"):
+        return
+    user = ADMIN_USER
+    pw = ADMIN_PASSWORD or secrets.token_urlsafe(12)
+    generated = not ADMIN_PASSWORD
+    _write_json(ADMIN_FILE, {
+        "username": user,
+        "pw": _pw_hash(pw),
+        "role": "admin",
+        "created": time.time(),
+        "generated": generated,
+    })
+    print("=" * 62, flush=True)
+    print("[auth] standalone 模式：已创建 admin 账号", flush=True)
+    print("[auth]   用户名 : %s" % user, flush=True)
+    print("[auth]   身份串 : %s" % normalize_identity(user), flush=True)
+    print("[auth]   密码   : %s%s" % (pw, "   <-- 随机生成，请登录后立即修改" if generated else ""),
+          flush=True)
+    print("=" * 62, flush=True)
+
+
+ensure_admin()   # 模块加载即启动引导（等价于 startup 钩子）
 
 def user_hash(sid):
     """由身份派生稳定目录 hash；None/空 视为固定匿名桶。"""
@@ -329,20 +462,56 @@ def _fix_mojibake(s):
     return fixed
 
 def current_identity(request: Request) -> str:
-    """FastAPI 依赖：解析当前请求归属身份，优先级：
-    1) 网关注入的 X-User-Email（真实登录用户，形如 {username}@local）——
-       **仅当来源 IP 处于 TRUSTED_PROXY_NETS 内才采信**，防止绕过网关直连伪造身份；
-    2) 浏览器级 X-Session-Id（直连 / 无网关场景，维持原行为）；
-    3) 均无 → None（落到 __anon__ 匿名桶，由 _sid_key 处理）。
+    """FastAPI 依赖：解析当前请求归属身份。按 auth_mode 三档切换：
+
+    standalone : 只认 RM 自己下发的会话 cookie（登录所得），**忽略** X-User-Email。
+                 身份串一律 <name>@local（见 normalize_identity），与网关时代键对齐。
+    gateway    : 只认网关注入的 X-User-Email——**仅当来源 IP 处于 TRUSTED_PROXY_NETS 内才采信**，
+                 防止绕过网关直连伪造身份；**忽略** X-Session-Id（杜绝自报身份）。
+    auto（默认）: 可信 email > 浏览器级 X-Session-Id > None（落到 __anon__ 匿名桶，
+                 由 _sid_key / user_hash 处理）。维持历史行为，也是两种形态间的过渡桥。
+
     用于合集归属、任务隔离等需要「稳定用户身份」的场景。"""
+    if AUTH_MODE == "standalone":
+        ident = _unsign(request.cookies.get("rm_session") or "") or ""
+        return _fix_mojibake(ident) or None
     client_ip = request.client.host if request.client else ""
     email = (request.headers.get("x-user-email") or "").strip()
     if email and not _is_trusted_proxy(client_ip):
         email = ""          # 非可信来源：忽略伪造的 email 头
+    if AUTH_MODE == "gateway":
+        # 严格模式：只认网关注入的身份，不退回 X-Session-Id
+        ident = _decode_punycode_email(email) or ""
+        return _fix_mojibake(ident) or None
     sid = (request.headers.get("x-session-id") or "").strip()
     # 归一化身份串：把「UTF-8 被 latin-1 误解」的乱码还原，避免同一账号因来源头不同而分裂成两个身份
     ident = _decode_punycode_email(email) or sid or ""
     return _fix_mojibake(ident) or None
+
+# standalone 模式下免登录的公开入口（登录自身、引导、调试回显、封面、共享取流/信息）
+_STANDALONE_PUBLIC = (
+    "/api/bootstrap", "/api/login", "/api/logout", "/api/whoami",
+    "/api/thumbnail-cache/", "/api/files/", "/api/share/",
+)
+
+
+@app.middleware("http")
+async def _standalone_auth_gate(request, call_next):
+    """standalone 模式：无有效会话时，拒绝除公开入口外的所有 /api 调用（401）。
+
+    背景：current_identity 解析不到身份时会落到**共享的 __anon__ 匿名桶**
+    （_sid_key / user_hash 对空身份统一返回 __anon__）。单用户直连时无所谓，
+    但独立多用户部署下会让所有未登录请求共用同一个桶 → 互相读到对方数据。
+    这里统一在入口拦掉；登录、bootstrap、封面、共享取流等仍需免登录可用。
+    """
+    if AUTH_MODE == "standalone":
+        p = request.url.path
+        if p.startswith("/api/") and not p.startswith(_STANDALONE_PUBLIC):
+            if not _unsign(request.cookies.get("rm_session") or ""):
+                return JSONResponse({"detail": "未登录（standalone 模式需先登录）"},
+                                    status_code=401)
+    return await call_next(request)
+
 
 def _entry_dedup_key(entry):
     """合集条目去重键：(vid, 序号, 标题)。
@@ -1055,6 +1224,155 @@ def whoami(request: Request):
         "email_trusted": trusted,
         "trusted_nets": TRUSTED_PROXY_NETS,
     }
+
+def _require_admin(request: Request) -> str:
+    """admin 校验：身份串必须等于 admin 账号归一化后的身份（默认 admin@local）。
+
+    与回收站三处 `if sid != "admin@local"` 用同一把尺子，standalone 登录后天然满足。"""
+    sid = current_identity(request)
+    if not sid or sid != normalize_identity(ADMIN_USER):
+        raise HTTPException(403, "仅 admin 可操作")
+    return sid
+
+
+@app.get("/api/bootstrap")
+def bootstrap(request: Request):
+    """前端启动引导：下发身份模式、当前身份、是否需要登录。不触达他人数据。"""
+    sid = current_identity(request)
+    return {
+        "auth_mode": AUTH_MODE,
+        "identity": sid,
+        "is_admin": bool(sid) and sid == normalize_identity(ADMIN_USER),
+        "login_required": AUTH_MODE == "standalone" and not sid,
+    }
+
+
+class LoginReq(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@app.post("/api/login")
+def login(req: LoginReq):
+    """standalone 登录：校验 admin 或普通账号，成功后下发签名会话 cookie。"""
+    if AUTH_MODE != "standalone":
+        raise HTTPException(400, "当前不是 standalone 模式，无需登录（身份由网关提供）")
+    name = (req.username or "").strip()
+    pw = req.password or ""
+    if not name or not pw:
+        raise HTTPException(400, "请填写用户名和密码")
+    ident = ""
+    adm = _load_admin()
+    if adm.get("username") and name == adm.get("username") and _pw_verify(pw, adm.get("pw", "")):
+        ident = normalize_identity(adm["username"])
+    else:
+        acc = _load_accounts().get(name)
+        if acc and _pw_verify(pw, acc.get("pw", "")):
+            ident = normalize_identity(name)
+    if not ident:
+        raise HTTPException(401, "用户名或密码错误")
+    resp = JSONResponse({"ok": True, "identity": ident,
+                         "is_admin": ident == normalize_identity(ADMIN_USER),
+                         "must_change_password": bool(adm.get("generated"))})
+    resp.set_cookie("rm_session", _sign(ident), httponly=True, samesite="lax", path="/")
+    return resp
+
+
+@app.post("/api/logout")
+def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("rm_session", path="/")
+    return resp
+
+
+# ---- admin 用户管理（standalone 下 RM 自带账号体系）----
+
+@app.get("/api/admin/users")
+def admin_users(request: Request):
+    _require_admin(request)
+    out = []
+    adm = _load_admin()
+    if adm.get("username"):
+        out.append({"username": adm["username"],
+                    "identity": normalize_identity(adm["username"]), "role": "admin"})
+    for u, d in _load_accounts().items():
+        out.append({"username": u, "identity": normalize_identity(u),
+                    "role": d.get("role", "user")})
+    return {"ok": True, "users": out, "auth_mode": AUTH_MODE}
+
+
+class UserCreateReq(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@app.post("/api/admin/users")
+def admin_user_create(req: UserCreateReq, request: Request):
+    """新增用户。身份串自动补 @local，保证与网关时代的存储键对齐。"""
+    _require_admin(request)
+    u = (req.username or "").strip()
+    pw = (req.password or "").strip()
+    if not u:
+        raise HTTPException(400, "请填写用户名")
+    if "@" in u:
+        raise HTTPException(400, "用户名不要包含 @（系统会自动补 @local 后缀）")
+    if u == ADMIN_USER:
+        raise HTTPException(400, "该用户名保留给 admin")
+    generated = not pw
+    if generated:
+        pw = secrets.token_urlsafe(10)
+    acc = _load_accounts()
+    acc[u] = {"pw": _pw_hash(pw), "role": "user", "created": time.time()}
+    _write_json(ACCOUNTS_FILE, acc)
+    return {"ok": True, "username": u, "identity": normalize_identity(u), "password": pw,
+            "generated": generated,
+            "note": "身份串已补 @local；若该用户曾在网关下使用同名账号，其历史数据可直接取回"}
+
+
+@app.post("/api/admin/users/{u}/reset")
+def admin_user_reset(u: str, req: UserCreateReq, request: Request):
+    _require_admin(request)
+    acc = _load_accounts()
+    if u not in acc:
+        raise HTTPException(404, "用户不存在")
+    pw = (req.password or "").strip() or secrets.token_urlsafe(10)
+    acc[u]["pw"] = _pw_hash(pw)
+    _write_json(ACCOUNTS_FILE, acc)
+    return {"ok": True, "username": u, "password": pw}
+
+
+@app.delete("/api/admin/users/{u}")
+def admin_user_delete(u: str, request: Request):
+    """删除登录账号。注意：只删账号，不动资源——其数据仍在 users/<hash>/ 桶里。"""
+    _require_admin(request)
+    acc = _load_accounts()
+    if u not in acc:
+        raise HTTPException(404, "用户不存在")
+    acc.pop(u, None)
+    _write_json(ACCOUNTS_FILE, acc)
+    return {"ok": True, "username": u,
+            "note": "仅删除登录账号；资源仍留在 users/<hash> 桶中，用同名重建账号即可取回"}
+
+
+class PwChangeReq(BaseModel):
+    old_password: str = ""
+    new_password: str = ""
+
+
+@app.post("/api/admin/password")
+def admin_change_password(req: PwChangeReq, request: Request):
+    """admin 自助改密（首启随机生成的密码应尽快改掉）。"""
+    _require_admin(request)
+    adm = _load_admin()
+    if not _pw_verify(req.old_password or "", adm.get("pw", "")):
+        raise HTTPException(401, "原密码错误")
+    if not (req.new_password or "").strip():
+        raise HTTPException(400, "新密码不能为空")
+    adm["pw"] = _pw_hash(req.new_password)
+    adm["generated"] = False
+    _write_json(ADMIN_FILE, adm)
+    return {"ok": True}
+
 
 class ShareCreateReq(BaseModel):
     resource_id: str = ""
