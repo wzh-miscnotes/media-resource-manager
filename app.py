@@ -646,24 +646,26 @@ def _add_to_collection(sid, entry, target_cid="default"):
                         it[k] = v
                 it["resource_id"] = it.get("resource_id") or res_id
                 _save_collections()
-                remove_trash_entry(res_id)  # 引用复活清回收站（幂等）
-                return
-        # 2) 同一集但换了目录（重下/换任务目录）：替换旧条目，沿用其 resource_id
+                remove_trash_entry(res_id, entry.get("body_key8"))  # 引用复活清回收站（精确）
+                return None
+        # 2) 同一集但换了目录/内容（重下/换任务目录/换内容）：替换旧条目，沿用其 resource_id
         key = _entry_dedup_key(entry)
         if key:
             for i, it in enumerate(target["items"]):
                 if _entry_dedup_key(it) == key:
                     old_res = it.get("resource_id") or res_id
+                    old_rel = it.get("rel_path")  # R3：被替换的旧版本 rel_path
                     merged = dict(it)
                     merged.update({k: v for k, v in entry.items() if v not in (None, "")})
                     merged["resource_id"] = old_res
                     target["items"][i] = merged
                     _save_collections()
-                    remove_trash_entry(res_id)  # 引用复活清回收站（幂等）
-                    return
+                    remove_trash_entry(res_id, merged.get("body_key8"))  # 引用复活清回收站（精确）
+                    return old_rel
         target["items"].append(entry)
         _save_collections()
-        remove_trash_entry(res_id)  # 新建引用：引用复活清回收站（幂等）
+        remove_trash_entry(res_id, entry.get("body_key8"))  # 新建引用：引用复活清回收站（精确）
+        return None
     except Exception:
         pass
 
@@ -699,7 +701,23 @@ def count_active_refs(rid):
                     n += 1
     return n
 
-def ensure_trash_entry(rid, title, from_sid, rel_path=None, item=None):
+def _count_active_refs_body(rid, body_key8):
+    """(rid, body_key8) 级活跃引用计数：用于回收站列表精确显示某旧版本是否仍被引用。"""
+    if not rid or not body_key8:
+        return 0
+    data = _load_collections()
+    n = 0
+    for owner, v in data.items():
+        for c in v.get("collections", []):
+            if c.get("id") == "__trash__":
+                continue
+            for it in c.get("items", []):
+                rp = (it.get("rel_path") or "").replace("\\", "/")
+                if rp.startswith("resources/" + rid + "/" + body_key8 + "/"):
+                    n += 1
+    return n
+
+def ensure_trash_entry(rid, title, from_sid, rel_path=None, item=None, body_key8=None):
     """引用归零时把资源移入 admin 回收站（幂等：已存在则跳过）。物理文件不动。
 
     rel_path 保留最后删除的那条引用的【具体文件】路径；restore 时据此重建可 serve 的引用，
@@ -711,10 +729,14 @@ def ensure_trash_entry(rid, title, from_sid, rel_path=None, item=None):
     if not rid:
         return
     trash = _ensure_trash_collection()
-    if any(it.get("resource_id") == rid for it in trash["items"]):
+    bk = body_key8 or ""
+    # 去重键 = (resource_id, body_key8)：rid 级条目（bk=""）与 (rid, 旧版本) 条目互不冲突，
+    # 保证「换内容」产生的旧版本回收站条目不会误判为已存在而被跳过。
+    if any(it.get("resource_id") == rid and (it.get("body_key8") or "") == bk for it in trash["items"]):
         return
     entry = {
         "resource_id": rid,
+        "body_key8": bk,
         "rel_path": rel_path or ("resources/" + rid + "/"),
         "title": title or rid,
         "trashed_from": from_sid,
@@ -728,8 +750,11 @@ def ensure_trash_entry(rid, title, from_sid, rel_path=None, item=None):
     trash["items"].append(entry)
     _save_collections()
 
-def remove_trash_entry(rid):
-    """引用复活（新增引用 / restore）时从回收站移除该 rid（幂等）。"""
+def remove_trash_entry(rid, body_key8=None):
+    """引用复活（新增引用 / restore）时从回收站移除该条目（幂等）。
+
+    body_key8 缺省（None）保持旧语义：移除该 rid 下所有回收站条目（rid 级引用归零场景）。
+    传入 body_key8 时精确移除 (rid, body_key8) 条目，避免误删同 rid 的其它版本。"""
     if not rid:
         return
     data = _load_collections()
@@ -738,7 +763,12 @@ def remove_trash_entry(rid):
     if not trash:
         return
     before = len(trash["items"])
-    trash["items"] = [it for it in trash["items"] if it.get("resource_id") != rid]
+    if body_key8 is None:
+        trash["items"] = [it for it in trash["items"] if it.get("resource_id") != rid]
+    else:
+        bk = body_key8 or ""
+        trash["items"] = [it for it in trash["items"]
+                          if not (it.get("resource_id") == rid and (it.get("body_key8") or "") == bk)]
     if len(trash["items"]) != before:
         _save_collections()
 
@@ -1372,7 +1402,7 @@ def _shared_with_me_collection(identity):
             "title": src.get("title") or (tok or {}).get("title") or rel,
             "rel_path": rel,
             "subtitle": sub,
-            "subtitle_srt": _subtitle_srt_rel(sub),
+            "subtitle_srt": (src.get("subtitle_srt") or _subtitle_srt_rel(sub)),
             "subtitle_source": src.get("subtitle_source", ""),
             "article_rel": (art_rel or ""),
             "article_filename": (os.path.basename(art_rel) if art_rel else ""),
@@ -1570,10 +1600,12 @@ def _unlock_owner_shares(owner, rid):
 
 class TrashPurgeReq(BaseModel):
     rid: str = ""
+    body_key8: str = ""   # 指定则只清理该旧版本子目录，否则（rid 级）清理整个资源池目录
 
 class TrashRestoreReq(BaseModel):
     rid: str = ""
     target_sid: str = ""
+    body_key8: str = ""   # 指定则精确还原该旧版本，否则按 rid 级条目还原
 
 @app.get("/api/trash")
 def trash_list(sid: str = Depends(current_identity)):
@@ -1587,8 +1619,14 @@ def trash_list(sid: str = Depends(current_identity)):
     out = []
     for it in items:
         r = it.get("resource_id")
-        phys = os.path.isdir(os.path.join(RESOURCES_DIR, r)) if r else False
-        out.append({**it, "physical_exists": phys, "active_refs": count_active_refs(r)})
+        bk = it.get("body_key8") or ""
+        if bk:
+            phys = os.path.isdir(os.path.join(RESOURCES_DIR, r, bk))
+        else:
+            phys = os.path.isdir(os.path.join(RESOURCES_DIR, r)) if r else False
+        # 精确活跃引用数：有 body_key8 时按 (rid, body_key8) 计，否则回退 rid 级
+        active = _count_active_refs_body(r, bk) if bk else count_active_refs(r)
+        out.append({**it, "physical_exists": phys, "active_refs": active})
     return {"ok": True, "items": out}
 
 @app.post("/api/trash/purge")
@@ -1598,16 +1636,19 @@ def trash_purge(req: TrashPurgeReq, sid: str = Depends(current_identity)):
     if sid != "admin@local":
         raise HTTPException(403, "仅管理员可清理回收站")
     rid = (req.rid or "").strip()
+    bk = (req.body_key8 or "").strip()
     if not rid:
         raise HTTPException(400, "rid 必填")
-    remove_trash_entry(rid)  # 先从回收站移除
-    pd = os.path.join(RESOURCES_DIR, rid)
+    remove_trash_entry(rid, bk or None)  # 精确移除匹配的回收站条目（bk 缺省则移除该 rid 全部）
+    # 物理清理：指定 body_key8 只删该旧版本子目录，否则（rid 级）删整个资源池目录。
+    # 必须精确，否则会误删仍活跃的新版本内容。
+    pd = os.path.join(RESOURCES_DIR, rid, bk) if bk else os.path.join(RESOURCES_DIR, rid)
     physical_removed = False
     if os.path.isdir(pd):
         shutil.rmtree(pd, ignore_errors=True)
         physical_removed = not os.path.isdir(pd)
     _revoke_shares_for_resource(rid)
-    return {"ok": True, "rid": rid, "physical_removed": physical_removed}
+    return {"ok": True, "rid": rid, "body_key8": bk, "physical_removed": physical_removed}
 
 @app.post("/api/trash/restore")
 def trash_restore(req: TrashRestoreReq, sid: str = Depends(current_identity)):
@@ -1616,12 +1657,15 @@ def trash_restore(req: TrashRestoreReq, sid: str = Depends(current_identity)):
     if sid != "admin@local":
         raise HTTPException(403, "仅管理员可恢复")
     rid = (req.rid or "").strip()
+    bk = (req.body_key8 or "").strip()
     if not rid:
         raise HTTPException(400, "rid 必填")
     data = _load_collections()
     cols = data.get("admin@local", {}).get("collections", [])
     trash = next((c for c in cols if c.get("id") == "__trash__"), None)
-    entry = next((it for it in (trash["items"] if trash else []) if it.get("resource_id") == rid), None)
+    # 精确匹配：指定 body_key8 还原该旧版本，否则按 rid 级条目还原。
+    entry = next((it for it in (trash["items"] if trash else [])
+                  if it.get("resource_id") == rid and (it.get("body_key8") or "") == bk), None)
     if not entry:
         raise HTTPException(404, "回收站中无此资源")
     tgt = (req.target_sid or "").strip() or entry.get("trashed_from") or "admin@local"
@@ -1640,7 +1684,8 @@ def trash_restore(req: TrashRestoreReq, sid: str = Depends(current_identity)):
         new_item["restored_at"] = int(time.time())
         default["items"].append(new_item)
     if trash:
-        trash["items"] = [it for it in trash["items"] if it.get("resource_id") != rid]
+        trash["items"] = [it for it in trash["items"]
+                          if not (it.get("resource_id") == rid and (it.get("body_key8") or "") == bk)]
     _save_collections()
     # 资源恢复到 owner 正常合集后，解除该 owner 对应令牌的锁定（令牌仍 revoked，需手动重新开启）
     _unlock_owner_shares(tgt, rid)
@@ -1676,7 +1721,7 @@ def share_info(token: str, sid: str = Depends(current_identity)):
         "resource_id": rid,
         "rel_path": tok.get("rel_path"),
         "subtitle": (item or {}).get("subtitle", ""),
-        "subtitle_srt": _subtitle_srt_rel((item or {}).get("subtitle", "")),
+        "subtitle_srt": ((item or {}).get("subtitle_srt") or _subtitle_srt_rel((item or {}).get("subtitle", ""))),
         "subtitle_source": (item or {}).get("subtitle_source", ""),
         "article_rel": article_rel,
         "article_filename": article_filename,
@@ -1881,7 +1926,7 @@ def library(sid: str = Depends(current_identity)):
                     healed = True
             items.append({
                 **it,
-                "subtitle_srt": _subtitle_srt_rel(it.get("subtitle")),
+                "subtitle_srt": (it.get("subtitle_srt") or _subtitle_srt_rel(it.get("subtitle"))),
                 "stale": (not rel) or (not os.path.isfile(os.path.join(DOWNLOADS, rel))),
             })
         out.append({"id": c["id"], "name": c.get("name", c["id"]), "shared": False, "items": items})
@@ -3635,6 +3680,78 @@ def _find_identical_media(pool_dir, content_sha256):
     return None
 
 
+def _pick_main_media_in_dir(d):
+    """返回目录内体积最大的主媒体文件绝对路径（无则 None）。用于回收站还原定位主文件。"""
+    if not os.path.isdir(d):
+        return None
+    best, best_sz = None, -1
+    for fn in os.listdir(d):
+        if fn.lower().endswith(MEDIA_EXT) and os.path.isfile(os.path.join(d, fn)):
+            sz = os.path.getsize(os.path.join(d, fn))
+            if sz > best_sz:
+                best_sz, best = sz, os.path.join(d, fn)
+    return best
+
+
+def _recycle_unreferenced_body_dirs(rid, keep_body_key8):
+    """R2（换内容回收，2026-10-21）：扫描 resources/<rid>/ 下所有 body_key8 子目录，
+    凡不被任何活跃（非 __trash__）条目 rel_path 引用的子目录，登记为回收站条目
+    （物理保留，绝不直接删；resource_id 仍用真实 rid + 附加 body_key8 字段以便精确还原/清理）。
+
+    背景：换内容 = 同 rid 多 body_key8 子目录，旧子目录因 rid 仍被新条目引用而 rid 级回收站
+    （count_active_refs(rid)==0 才触发）永不触发，旧文件成孤儿。此处补 (rid, body_key8) 级判定，
+    让旧版本进回收站可恢复，而非靠人扫或静默丢弃。"""
+    if not rid or not keep_body_key8:
+        return
+    res_rid_dir = os.path.join(RESOURCES_DIR, rid)
+    if not os.path.isdir(res_rid_dir):
+        return
+    # 收集所有活跃条目引用的 body_key8 子目录（rel_path 形如 resources/<rid>/<body_key8>/...）
+    referenced = set()
+    data = _load_collections()
+    for owner, v in data.items():
+        for c in v.get("collections", []):
+            if c.get("id") == "__trash__":
+                continue
+            for it in c.get("items", []):
+                rp = (it.get("rel_path") or "").replace("\\", "/")
+                if rp.startswith("resources/" + rid + "/"):
+                    parts = rp.split("/")
+                    if len(parts) >= 3:
+                        referenced.add(parts[2])
+    for sub in sorted(os.listdir(res_rid_dir)):
+        sub_dir = os.path.join(res_rid_dir, sub)
+        if not os.path.isdir(sub_dir):
+            continue
+        if sub == keep_body_key8 or sub in referenced:
+            continue
+        # 无引用 -> 旧版本，登记回收站（物理保留，绝不直接删）
+        main = _pick_main_media_in_dir(sub_dir)
+        rel = (os.path.relpath(main, DOWNLOADS).replace(os.sep, "/")
+               if main else ("resources/" + rid + "/" + sub + "/"))
+        # 构建可恢复快照：扫描子目录里的封面/字幕，使 restore 后能还原可播放条目
+        cover = next((f for f in os.listdir(sub_dir)
+                      if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))), "") or ""
+        sub_file = (next((f for f in os.listdir(sub_dir) if f.lower().endswith(".txt")), "") or
+                    next((f for f in os.listdir(sub_dir) if f.lower().endswith(".srt")), "") or "")
+        snap = {
+            "rel_path": rel,
+            "title": (rid + " (旧内容 " + sub + ")"),
+            "resource_id": rid,
+            "body_key8": sub,
+            "vid": "",
+            "seq": "",
+            "duration": None,
+            "cover": cover,
+            "subtitle": sub_file,
+            "subtitle_srt": "",
+            "subtitle_source": "official" if sub_file else "",
+            "added_at": time.time(),
+        }
+        ensure_trash_entry(rid, snap["title"], "ingest(R2)", rel_path=rel,
+                           item=snap, body_key8=sub)
+
+
 def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target_cid="default",
                       vid="", seq="", subtitle_source="", cover="", content_sha256=""):
     """统一入池 + 登记合集引用（ingest / upload / import-dir / watcher 共用，见 RM-实施指引 §2）。
@@ -3646,7 +3763,10 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
       - 否则把 staging 主文件 + 附加物迁入池。
     content_sha256 由调用方传入（调用方本就为算 rid/body_key8 哈希过文件，避免重复 I/O）。
     始终 _add_to_collection 登记引用（删除引用归零即入 __trash__，与资源池同保护）。
-    返回 (resource_id, dedup_hit, rel_path)。
+    R1（2026-10-21）：附加物支持 txt + srt 等多字幕，txt 优先绑 entry["subtitle"]（match_subtitle
+        契约仅认 _字幕.txt），srt 等作为增强以 entry["subtitle_srt"] 记录池内相对路径。
+    R2（2026-10-21）：末尾扫同 rid 下无引用的旧 body_key8 子目录 -> 入回收站（物理保留）。
+    返回 (resource_id, dedup_hit, rel_path, replaced_rel_path)。
     """
     pool_dir = _pool_dir(rid, body_key8)
     existing = _find_identical_media(pool_dir, content_sha256)
@@ -3676,20 +3796,23 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
         "subtitle": "",
         "added_at": time.time(),
     }
-    subs = [e for e in (new_extras or []) if e.lower().endswith(SIDE_EXT)]
-    if subs:
-        entry["subtitle"] = subs[0]
-    # 按扩展名归类附加物：字幕(.srt/.vtt/.ass/.xml/.txt) 与 封面图(.jpg/.jpeg/.png/.webp)。
-    # 既支持 watcher 传入「视频+字幕+封面」三件套，也兼容老 import-dir（仅字幕）与
-    # /api/ingest（subtitle_path+cover）的既有调用——向后兼容，无传入则保持空。
+    # 按扩展名归类附加物（R1，2026-10-21）：
+    #   - 字幕：RM 的 match_subtitle 仅认 _字幕.txt 后缀，故 txt 优先绑定到 entry["subtitle"]；
+    #     srt/vtt/ass/xml 作为「可选增强」保留进资源池（已被 _move_staged_to_pool 物理迁移），
+    #     并以 entry["subtitle_srt"] 记录其池内相对路径（前端按需使用，非 match_subtitle 契约）。
+    #   - 封面：.jpg/.jpeg/.png/.webp 作为候选（与显式 cover 字段二选一）。
+    # 向后兼容 watcher 三件套 / 老 import-dir（仅字幕） / /api/ingest（subtitle_path+cover）。
     IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp")
-    SUB_EXTS = (".srt", ".vtt", ".ass", ".xml", ".txt")
     _extras = list(new_extras or [])
-    sub_candidate = next((e for e in _extras if e.lower().endswith(SUB_EXTS)), "")
+    _txt = next((e for e in _extras if e.lower().endswith(".txt")), "")
+    _srt = next((e for e in _extras if e.lower().endswith(".srt")), "")
+    _other_sub = next((e for e in _extras if e.lower().endswith((".vtt", ".ass", ".xml"))), "")
     cover_candidate = next((e for e in _extras if e.lower().endswith(IMG_EXTS)), "")
-    entry["subtitle"] = sub_candidate
-    # subtitle_source：显式传入优先；否则有字幕即记为 official（平台/下载端字幕），无则空。
-    entry["subtitle_source"] = subtitle_source or ("official" if sub_candidate else "")
+    # txt 优先（match_subtitle 契约）；无 txt 时退化用其它字幕格式，保证有字幕可显。
+    entry["subtitle"] = _txt or _other_sub
+    entry["subtitle_srt"] = _srt  # 可选增强，记录池内相对路径
+    # subtitle_source：显式传入优先；否则有字幕即记为 official，无则空。
+    entry["subtitle_source"] = subtitle_source or ("official" if entry["subtitle"] else "")
     # 封面：显式传入优先；否则把池内封面复制进缩略图缓存、以缓存名回填
     # （前端只认 /api/thumbnail-cache/{缓存名}，直接写相对路径会 404 显示「无封面」）
     _cover_in = cover or cover_candidate or ""
@@ -3700,8 +3823,10 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
         entry["cover"] = _cache_cover_file(_abs) or _cover_in
     else:
         entry["cover"] = ""
-    _add_to_collection(owner, entry, target_cid)
-    return rid, dedup_hit, rel_main
+    replaced_rel = _add_to_collection(owner, entry, target_cid)
+    # R2（换内容回收，2026-10-21）：登记同 rid 下无引用的旧 body_key8 子目录到回收站（物理保留）。
+    _recycle_unreferenced_body_dirs(rid, body_key8)
+    return rid, dedup_hit, rel_main, replaced_rel
 
 
 class IngestReq(BaseModel):
@@ -3710,8 +3835,10 @@ class IngestReq(BaseModel):
     body_key8: str = ""  # 兼容旧生产者；RM 现按内容哈希重算（见 /api/ingest，O3 治本）
     staged_path: str
     title: str = ""
-    subtitle_path: str = ""
+    subtitle_path: str = ""       # 主字幕（建议 _字幕.txt，RM match_subtitle 契约）
+    subtitle_srt_path: str = ""   # R1（2026-10-21）：增强字幕 srt，入池后记录到 subtitle_srt
     cover: str = ""
+    extras: list[str] = []        # R1（2026-10-21）：任意额外文件（srt/其它字幕/封面等），向后兼容
     target_cid: str = "default"
 
 
@@ -3731,12 +3858,15 @@ def ingest(req: IngestReq, sid: str = Depends(current_identity)):
     # body_key8 由 RM 按内容哈希派生（覆盖生产者传入值），统一资源池去重语义
     _h = _sha256_of_file(req.staged_path)
     body_key8 = _body_key8_from_hash(_h)
-    extras = [p for p in (req.subtitle_path, req.cover) if p and os.path.isfile(p)]
-    rid, dedup_hit, rel = _ingest_into_pool(
+    extras = [p for p in (req.subtitle_path, req.subtitle_srt_path, req.cover) + tuple(req.extras)
+               if p and os.path.isfile(p)]
+    rid, dedup_hit, rel, replaced = _ingest_into_pool(
         owner, req.rid, body_key8, req.staged_path, extras, req.title, req.target_cid,
         content_sha256=_h,
     )
-    return {"ok": True, "rid": rid, "resource_id": rid, "dedup_hit": dedup_hit, "rel_path": rel}
+    # R3（2026-10-21）：返回被替换掉的旧版本 rel_path（换内容场景），无替换则为空串。
+    return {"ok": True, "rid": rid, "resource_id": rid, "dedup_hit": dedup_hit,
+            "rel_path": rel, "replaced_rel_path": replaced or ""}
 
 
 class ImportDirReq(BaseModel):
