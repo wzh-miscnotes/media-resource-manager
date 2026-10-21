@@ -65,9 +65,9 @@ def part_a():
     rid = "r" + h[:15]
     bk8 = rm_app._body_key8_from_hash(h)
 
-    r1, d1, _ = rm_app._ingest_into_pool(
+    r1, d1, _, _ = rm_app._ingest_into_pool(
         "admin@local", rid, bk8, f1, [], "t1", content_sha256=h)
-    r2, d2, _ = rm_app._ingest_into_pool(
+    r2, d2, _, _ = rm_app._ingest_into_pool(
         "admin@local", rid, bk8, f2, [], "t2", content_sha256=h)
 
     pool_dir = os.path.join(_TMP, "resources", rid, bk8)
@@ -93,7 +93,7 @@ def part_a():
     hy = rm_app._sha256_of_file(fy)
     rid_y = "r" + hy[:15]
     bk8_y = rm_app._body_key8_from_hash(hy)
-    _, dy, _ = rm_app._ingest_into_pool(
+    _, dy, _, _ = rm_app._ingest_into_pool(
         "admin@local", rid_y, bk8_y, fy, [], "ty", content_sha256=hy)
     pool_y = os.path.join(_TMP, "resources", rid_y, bk8_y)
     check("A5 不同内容独立存储（dy=False, 各 1 份）",

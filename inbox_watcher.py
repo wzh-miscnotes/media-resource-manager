@@ -79,9 +79,20 @@ def _ingest_group(proc_dir, stem, owner_default):
     vid = max(vids, key=lambda f: os.path.getsize(os.path.join(proc_dir, f)))
     vid_abs = os.path.join(proc_dir, vid)
 
-    # 字幕：匹配 {stem}_字幕.txt / .srt（与下载端 deliver_to_inbox 命名对齐）
+    # 字幕：主字幕走 match_subtitle（仅认 _字幕.txt，保持契约）；
+    # 同时收集同 stem 的其它字幕（srt/vtt/ass/xml 等）一并作为 extras 入池。
+    # 背景（2026-10-21）：下载端是 txt+srt 双写，但此前只传 match_subtitle 的单个结果，
+    # srt 未进 extras → 入池后 .processing 清理时被物理删除，池内只剩 txt。
     sub_fn = match_subtitle(stem, name_set)
-    sub_abs = os.path.join(proc_dir, sub_fn) if sub_fn else ""
+    sub_files = [sub_fn] if sub_fn else []
+    for f in sorted(files):
+        if f in sub_files:
+            continue
+        fbase, fext = os.path.splitext(f)
+        if fext.lower() in SUB_EXTS and (fbase == stem or fbase == stem + "_字幕"):
+            sub_files.append(f)
+    sub_abs_list = [os.path.join(proc_dir, f) for f in sub_files
+                    if os.path.isfile(os.path.join(proc_dir, f))]
     # 封面：同 stem 的图
     cover_fn = next((f for f in files
                      if f.lower().endswith(IMG_EXTS) and os.path.splitext(f)[0] == stem), "")
@@ -92,10 +103,12 @@ def _ingest_group(proc_dir, stem, owner_default):
     body_key8 = _body_key8_from_hash(vid_hash)
 
     # extras 传绝对路径：_move_staged_to_pool 对绝对路径直接采用，无需依赖 DOWNLOADS 拼接
-    extras = [p for p in (sub_abs, cover_abs) if p and os.path.isfile(p)]
+    extras = [p for p in (sub_abs_list + [cover_abs]) if p and os.path.isfile(p)]
     title_final = title or _title_from_filename(vid)
 
-    rid_out, dedup, _rel = _ingest_into_pool(
+    # R1/R2/R3（2026-10-21）：_ingest_into_pool 返回 4 元组（多 replaced_rel_path），
+    # 此处必须解包 4 个，否则 ValueError: too many values to unpack（曾致 watcher 全量失败）。
+    rid_out, dedup, _rel, _replaced = _ingest_into_pool(
         owner, rid, body_key8, vid_abs, extras, title_final,
         target_cid=target_cid, vid=vid, seq=seq, content_sha256=vid_hash,
     )
