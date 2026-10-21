@@ -908,6 +908,29 @@ THUMBNAIL_CACHE_DIR = cfg["thumbnail_cache_dir"]
 
 os.makedirs(THUMBNAIL_CACHE_DIR, exist_ok=True)
 
+
+def _cache_cover_file(abs_path: str) -> str:
+    """把资源池内的封面图复制进缩略图缓存目录，返回缓存文件名（md5(内容)[:12]+ext）。
+
+    前端 `<img src="/api/thumbnail-cache/{it.cover}">` 只认**缓存文件名**，
+    不认资源目录相对路径 —— 因此入池时必须回填缓存名，否则封面 404 显示「无封面」。
+    失败返回空串（调用方按降级处理）。
+    """
+    try:
+        if not abs_path or not os.path.isfile(abs_path):
+            return ""
+        os.makedirs(THUMBNAIL_CACHE_DIR, exist_ok=True)
+        ext = os.path.splitext(abs_path)[1].lower() or ".jpg"
+        with open(abs_path, "rb") as f:
+            h = hashlib.md5(f.read()).hexdigest()[:12]
+        name = f"{h}{ext}"
+        dst = os.path.join(THUMBNAIL_CACHE_DIR, name)
+        if not os.path.isfile(dst):
+            shutil.copy2(abs_path, dst)
+        return name
+    except Exception:
+        return ""
+
 FNAME_TITLE_MAX = 50
 
 def _safe_fname_title(title: str, max_chars: int = FNAME_TITLE_MAX) -> str:
@@ -3667,8 +3690,16 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
     entry["subtitle"] = sub_candidate
     # subtitle_source：显式传入优先；否则有字幕即记为 official（平台/下载端字幕），无则空。
     entry["subtitle_source"] = subtitle_source or ("official" if sub_candidate else "")
-    # 封面：显式传入优先；否则取池内同名封面图相对路径（相对 DOWNLOADS）。
-    entry["cover"] = cover or cover_candidate or ""
+    # 封面：显式传入优先；否则把池内封面复制进缩略图缓存、以缓存名回填
+    # （前端只认 /api/thumbnail-cache/{缓存名}，直接写相对路径会 404 显示「无封面」）
+    _cover_in = cover or cover_candidate or ""
+    if _cover_in and "/" not in _cover_in and "\\" not in _cover_in and ":" not in _cover_in:
+        entry["cover"] = _cover_in          # 已是缓存文件名（上传/老数据），直接用
+    elif _cover_in:
+        _abs = _cover_in if os.path.isabs(_cover_in) else os.path.join(DOWNLOADS, _cover_in)
+        entry["cover"] = _cache_cover_file(_abs) or _cover_in
+    else:
+        entry["cover"] = ""
     _add_to_collection(owner, entry, target_cid)
     return rid, dedup_hit, rel_main
 
