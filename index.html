@@ -146,6 +146,13 @@
   .lib-toolbar select{padding:9px 12px;border:1px solid var(--line);border-radius:10px;font-size:14px;
     background:#fbfcfe;color:var(--text);outline:none;min-width:200px}
   .lib-count{color:var(--sub);font-size:13px;margin-left:auto}
+  /* 顶部 tab 行右侧的常显入口（回收站）：任何宽度都可见，不被 flex-wrap 挤掉 */
+  .tabs .spacer{flex:1}
+  .nav-act{margin-left:8px;font-size:13px;padding:6px 12px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--text);cursor:pointer;white-space:nowrap}
+  .nav-act:hover{border-color:#7aa7ff;color:#2b6cb0}
+  /* 回收站卡片：恢复/清理按钮浮于右上角 */
+  .lib-card.trash-card{position:relative}
+  .trash-actions{position:absolute;top:8px;right:8px;display:flex;gap:6px;z-index:2}
   .lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}
   .lib-card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;
     cursor:pointer;transition:.15s;display:flex;flex-direction:column}
@@ -465,6 +472,8 @@
 
   <nav class="tabs" data-page-node-id="IYCUae5uq6ZGMaD6HPyIyU">
     <div class="tab active" id="tabLibrary" onclick="switchTab('library')" data-page-node-id="AHwukLByaaYe0T3p5xl1Fy">📚 我的媒体库</div>
+    <span class="spacer"></span>
+    <button class="nav-act" id="btnTrash" onclick="openTrash()" title="回收站（引用归零的资源，物理保留，可清理/恢复）">♻ 回收站</button>
   </nav>
 
 
@@ -481,7 +490,6 @@
         <button class="btn-ghost btn-sm" onclick="openShareList()" title="管理我生成的全部分享链接" data-page-node-id="shareListBtn">🔗 我的共享</button>
         <button class="btn-ghost btn-sm" id="btnUpload" onclick="openUpload()" data-page-node-id="tSrfiE3LOHnTkdCjjSf8CI">⬆ 上传</button>
         <button class="btn-ghost btn-sm" id="btnImportDir" onclick="openImportDir()" data-page-node-id="rmImportDir">📂 目录导入</button>
-        <button class="btn-ghost btn-sm" id="btnTrash" onclick="openTrash()" title="回收站（引用归零的资源，物理保留，可清理/恢复）">♻ 回收站</button>
       </div>
       <div class="lib-batch hidden" id="libBatch" data-page-node-id="5zJyIJgQOloc0gnXBvjYID">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer" data-page-node-id="DFOGW184GPnk2rukrNCxKL">
@@ -545,7 +553,7 @@
           <select id="uploadTarget" data-page-node-id="P7dHRuDKQOgZGaJIxJXyDB"></select>
         </div>
         <input type="file" id="uploadFiles" multiple
-          accept="video/*,.mkv,.webm,.flv,.mov,.mp3,.aac,.srt,.vtt,.ass,.lrc,.txt" data-page-node-id="i2iuMKgwQSjly3FuLz8JfC">
+          accept="video/*,.mkv,.webm,.flv,.mov,.mp3,.aac,.srt,.vtt,.ass,.lrc,.txt,.jpg,.jpeg,.png,.webp,.json" data-page-node-id="i2iuMKgwQSjly3FuLz8JfC">
         <p class="muted" style="margin:0" data-page-node-id="nlhF8g2OEpF9DKhrgbKQWa">可一次选择多个文件；视频与字幕按「文件名主干相同」自动配对（字幕随视频绑定）。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
         <div style="display:flex;gap:10px;align-items:center" data-page-node-id="sEfKPiEqomYAjFscxx01y4">
           <button class="btn-primary btn-sm" id="uploadBtn" onclick="doUpload()" data-page-node-id="VGUOfEplFV2GpknvppEQwH">开始上传</button>
@@ -956,10 +964,16 @@ async function loadLibrary(){
     if(!r.ok){ libData = { collections: [] }; return; }
     libData = await r.json();
   }catch(e){ libData = { collections: [] }; }
-  sel.innerHTML = (libData.collections||[])
+  const isAdmin = !!libData.is_admin;
+  let opts = (libData.collections||[])
     .filter(c => !c.system && c.id !== "__trash__")
     .map(c =>
     `<option value="${esc(c.id)}">${esc(c.name)} (${c.items.length})</option>`).join("");
+  // A：回收站系统项——仅管理员且回收站非空时显示在下拉底部（红字），满足「下拉里能看到回收站」直觉
+  if(isAdmin && (libData.trash_count||0) > 0){
+    opts += `<option value="__trash__" style="color:#c0392b">♻ 回收站 (${libData.trash_count})</option>`;
+  }
+  sel.innerHTML = opts;
   if(prev && [...sel.options].some(o=>o.value===prev)) sel.value = prev;
   renderLibGrid();
 }
@@ -967,30 +981,34 @@ async function loadLibrary(){
 async function renderLibGrid(){
   const sel = document.getElementById("libColl");
   const cid = sel.value;
+  const isTrash = (cid === "__trash__");   // 下拉里的回收站系统项
   const coll = (libData.collections||[]).find(c=>c.id===cid) || {items:[]};
   const isShared = !!coll.shared;   // 「被共享」虚拟合集：他人资源，只读
   const grid = document.getElementById("libGrid");
   const empty = document.getElementById("libEmpty");
-  document.getElementById("libCount").textContent = `共 ${coll.items.length} 个视频`;
-  // 「默认合集」与「被共享」均不可重命名/删除
-  const locked = (cid === "default") || isShared;
+  document.getElementById("libCount").textContent = isTrash ? `回收站 ${coll.items.length} 个` : `共 ${coll.items.length} 个视频`;
+  // 「默认合集」「被共享」与「回收站」均不可重命名/删除
+  const locked = (cid === "default") || isShared || isTrash;
   const bR = document.getElementById("btnRenameColl");
   const bD = document.getElementById("btnDeleteColl");
   bR.disabled = locked; bD.disabled = locked;
   bR.style.opacity = locked ? .5 : 1;
   bD.style.opacity = locked ? .5 : 1;
-  // 「被共享」里的文件属于对方 → 禁用上传、隐藏批量操作条、露出「清理失效」
+  // 「被共享」里的文件属于对方 → 禁用上传；回收站只读同样禁用上传
   const bU = document.getElementById("btnUpload");
   if(bU){
-    bU.disabled = isShared; bU.style.opacity = isShared ? .5 : 1;
-    bU.title = isShared ? "「被共享」里的文件属于对方，不能在这里上传" : "";
+    bU.disabled = isShared || isTrash; bU.style.opacity = (isShared||isTrash) ? .5 : 1;
+    bU.title = isShared ? "「被共享」里的文件属于对方，不能在这里上传" : (isTrash ? "回收站为只读，不能上传" : "");
   }
   const bP = document.getElementById("btnPruneShared");
   if(bP) bP.classList.toggle("hidden", !isShared);
-  if(isShared) document.getElementById("libBatch").classList.add("hidden");
-  empty.textContent = isShared
+  if(isShared || isTrash) document.getElementById("libBatch").classList.add("hidden");
+  empty.textContent = isTrash
+    ? "回收站是空的。"
+    : isShared
     ? "「被共享」还是空的。打开别人发来的分享链接，点「📥 加入我的媒体库」即可收进来。"
     : "该合集还没有视频。可上传或目录导入后，会自动收录到这里。";
+  if(isTrash){ await renderTrashGrid(); return; }
   if(!coll.items.length){
     grid.innerHTML = "";
     empty.classList.remove("hidden");
@@ -1224,6 +1242,45 @@ async function openTrash(){
   }catch(e){ alert("加载回收站失败："+e); mask.classList.add("hidden"); }
 }
 function closeTrash(){ document.getElementById("trashMask").classList.add("hidden"); }
+// A 落地：下拉选中「回收站」时，主网格直接渲染回收站卡片（复用 .lib-card 样式），不再只靠弹窗
+async function renderTrashGrid(){
+  const grid = document.getElementById("libGrid");
+  const empty = document.getElementById("libEmpty");
+  grid.innerHTML = '<div class="muted">加载中…</div>';
+  try{
+    const r = await fetch("/api/trash");
+    if(!r.ok){ grid.innerHTML = '<div class="muted">无法访问回收站：'+r.status+'</div>'; return; }
+    const j = await r.json();
+    const items = j.items||[];
+    document.getElementById("libCount").textContent = `回收站 ${items.length} 个`;
+    if(!items.length){ grid.innerHTML=""; empty.textContent="回收站是空的。"; empty.classList.remove("hidden"); return; }
+    empty.classList.add("hidden");
+    grid.innerHTML = items.map((it)=>{
+      const rid = esc(it.resource_id);
+      const tn = esc(it.title||rid);
+      const snap = it.item_snapshot||{};
+      const cover = snap.cover ? `<img class="thumb" src="/api/thumbnail-cache/${encodeURIComponent(snap.cover)}">` : `<div class="thumb-ph">无封面</div>`;
+      const phys = it.physical_exists ? "物理✓" : "物理缺失";
+      return `<div class="lib-card trash-card">
+        ${cover}
+        <div class="meta">
+          <div class="t">${tn}</div>
+          <div class="sub"><span class="${it.physical_exists?'':'stale'}">${phys}</span> · 活跃引用 ${it.active_refs||0}</div>
+        </div>
+        <div class="trash-actions">
+          <button class="btn-primary btn-sm" onclick="event.stopPropagation();trashRestore('${rid}')">♻ 恢复</button>
+          <button class="btn-ghost btn-sm" style="color:#c0392b" onclick="event.stopPropagation();trashPurge('${rid}')">🗑 清理</button>
+        </div>
+      </div>`;
+    }).join("");
+  }catch(e){ grid.innerHTML='<div class="muted">加载回收站失败：'+e+'</div>'; }
+}
+// 回收站操作后刷新：网格视图（下拉选回收站）重拉 library；弹窗视图（顶部按钮）重渲染弹窗
+function refreshAfterTrashOp(){
+  const sel = document.getElementById("libColl");
+  if(sel && sel.value === "__trash__"){ loadLibrary(); }
+  else { const m=document.getElementById("trashMask"); if(m && !m.classList.contains("hidden")) openTrash(); }
+}
 function renderTrash(items){
   const box = document.getElementById("trashBody");
   if(!items.length){ box.innerHTML = '<div class="muted">回收站是空的。</div>'; return; }
@@ -1252,7 +1309,7 @@ async function trashRestore(rid){
     const j = await r.json().catch(()=>({}));
     if(!r.ok){ alert("恢复失败："+(j.detail||r.status)); return; }
     alert("已恢复至：" + (j.target_sid||""));
-    openTrash();
+    refreshAfterTrashOp();
   }catch(e){ alert("恢复失败："+e); }
 }
 async function trashPurge(rid){
@@ -1262,7 +1319,7 @@ async function trashPurge(rid){
     const j = await r.json().catch(()=>({}));
     if(!r.ok){ alert("清理失败："+(j.detail||r.status)); return; }
     alert("已永久清理。");
-    openTrash();
+    refreshAfterTrashOp();
   }catch(e){ alert("清理失败："+e); }
 }
 
@@ -2429,7 +2486,12 @@ async function doUpload(){
       let j = {};
       try{ j = JSON.parse(xhr.responseText || "{}"); }catch(_){}
       if(xhr.status >= 200 && xhr.status < 300){
-        msg.textContent = `上传完成，已登记 ${j.added||0} 个视频`;
+        const parts = [];
+        if(j.added) parts.push(`新增 ${j.added} 个视频`);
+        if(j.attached) parts.push(`补挂 ${j.attached} 个衍生物`);
+        if(j.pending) parts.push(`${j.pending} 个待补挂（视频入池后自动关联）`);
+        if(j.skipped) parts.push(`跳过 ${j.skipped} 个`);
+        msg.textContent = "上传完成：" + (parts.length ? parts.join("，") : "无变化");
         setTimeout(()=>{ closeUpload(); loadLibrary(); }, 600);
       } else {
         msg.textContent = "上传失败："+(j.detail||xhr.statusText||xhr.status);

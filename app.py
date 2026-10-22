@@ -220,6 +220,42 @@ MEDIA_EXT = (".mp4", ".mkv", ".webm", ".flv", ".mov", ".m4a", ".mp3", ".aac")
 
 SIDE_EXT = (".srt", ".vtt", ".ass", ".xml", ".jpg", ".png", ".json", ".txt")
 
+# 上传 / attach 分类用的扩展名（模块级，供上传入口与 attach 补挂共用）
+SUB_EXTS  = (".srt", ".vtt", ".ass", ".lrc", ".txt")  # 字幕 / 文本衍生物
+IMG_EXTS  = (".jpg", ".jpeg", ".png", ".webp")          # 封面
+META_EXT  = (".json",)                                   # meta.json 衍生物（O3 解耦）
+
+# 媒体类型推断（media_type 前瞻埋点，2026-10-22）：主体扩展名泛化，
+# 让资源池不仅认识「视频」，也能标记「音频 / 文字 / 图片」主体。
+VIDEO_EXT = (".mp4", ".mkv", ".webm", ".flv", ".mov")
+AUDIO_EXT = (".m4a", ".mp3", ".aac")
+TEXT_EXT  = (".txt", ".srt", ".vtt", ".ass", ".lrc", ".xml")
+
+def media_type_of(path):
+    """由文件扩展名推断 media_type：video / audio / text / image / other。"""
+    ext = os.path.splitext(path or "")[1].lower()
+    if ext in VIDEO_EXT:
+        return "video"
+    if ext in AUDIO_EXT:
+        return "audio"
+    if ext in TEXT_EXT:
+        return "text"
+    if ext in IMG_EXTS:
+        return "image"
+    return "other"
+
+def _norm_stem(stem):
+    """统一归一化主干：剥尾部 [BV号] → 剥 _字幕 标记 → 去分P序号前缀。
+
+    上传 / attach 配对时用它跨「视频 / 字幕 / 封面 / meta」对齐文件名主干，
+    使四类文件即使带不同后缀或下载工具标记也能准确归到同一资源主体。"""
+    if not stem:
+        return ""
+    s = strip_bracket_suffix(stem)
+    s = re.sub(r"_字幕$", "", s)
+    s = normalize_stem(s)
+    return s.strip()
+
 TASK_REGISTRY_DIR = os.path.join(DOWNLOADS, "_tasks")
 
 os.makedirs(TASK_REGISTRY_DIR, exist_ok=True)
@@ -1936,7 +1972,13 @@ def library(sid: str = Depends(current_identity)):
     shared = _shared_with_me_collection(sid)
     if shared:
         out.append(shared)
-    return {"collections": out}
+    is_admin = sid == normalize_identity(ADMIN_USER)
+    trash_count = 0
+    if is_admin:
+        _td = _load_collections().get("admin@local", {}).get("collections", [])
+        _tt = next((c for c in _td if c.get("id") == "__trash__"), None)
+        trash_count = len(_tt["items"]) if _tt else 0
+    return {"collections": out, "is_admin": is_admin, "trash_count": trash_count}
 
 @app.post("/api/collection")
 def create_collection(req: CollectionReq, sid: str = Depends(current_identity)):
@@ -2173,60 +2215,105 @@ async def upload_files(
     """从浏览器上传本地视频（及其字幕），按「内容哈希 rid + 内容派生 body_key8」直接入资源池；
     走 _add_to_collection 登记合集引用，删除引用归零即入 __trash__（与资源池条目同保护）。
     见 RM-实施指引 §2.2。内容级去重由 _ingest_into_pool 保证（同内容只存一份）。"""
-    SUB_EXTS = (".srt", ".vtt", ".ass", ".lrc", ".txt")
-    videos, subs = [], []
+    videos, subs, covers, metas = [], [], [], []
     for f in files:
         ext = os.path.splitext(f.filename or "")[1].lower()
         if ext in MEDIA_EXT:
             videos.append(f)
         elif ext in SUB_EXTS:
             subs.append(f)
-        # 其他类型静默忽略（仅处理媒体/字幕）
+        elif ext in IMG_EXTS:
+            covers.append(f)
+        elif ext in META_EXT:
+            metas.append(f)
+        # 其它类型静默忽略（仅处理媒体 / 字幕 / 封面 / meta）
 
     # 暂存到用户级 staging，再由 _ingest_into_pool 迁入资源池（staging 会被消费）
     stage_dir = os.path.join(user_root(sid), "_staging")
     os.makedirs(stage_dir, exist_ok=True)
-    saved_videos = {}  # stem -> (abs_path, filename, rid, body_key8)
+    saved_videos = {}  # stem -> (abs_path, filename, rid, body_key8, content_sha256)
     for f in videos:
         try:
             data = await f.read()
         except Exception:
             continue
-        size = len(data)
         h = hashlib.sha256(data).hexdigest()
         rid = "r" + h[:15]
         body_key8 = _body_key8_from_hash(h)
-        content_sha256 = h
         safe = _safe_upload_name(f.filename)
         dest = _uniq_path(os.path.join(stage_dir, safe))
         with open(dest, "wb") as w:
             w.write(data)
-        saved_videos[os.path.splitext(safe)[0]] = (dest, f.filename, rid, body_key8)
-    saved_subs = {}
-    for f in subs:
-        try:
-            data = await f.read()
-        except Exception:
-            continue
-        safe = _safe_upload_name(f.filename)
-        dest = _uniq_path(os.path.join(stage_dir, safe))
-        with open(dest, "wb") as w:
-            w.write(data)
-        saved_subs[os.path.basename(dest)] = dest
+        saved_videos[os.path.splitext(safe)[0]] = (dest, f.filename, rid, body_key8, h)
 
-    sub_map = set(saved_subs.keys())
+    async def _stage_bucket(lst):
+        out = {}
+        for f in lst:
+            try:
+                data = await f.read()
+            except Exception:
+                continue
+            safe = _safe_upload_name(f.filename)
+            dest = _uniq_path(os.path.join(stage_dir, safe))
+            with open(dest, "wb") as w:
+                w.write(data)
+            out[os.path.basename(dest)] = dest
+        return out
+
+    saved_subs = await _stage_bucket(subs)
+    saved_covers = await _stage_bucket(covers)
+    saved_metas = await _stage_bucket(metas)
+
+    # 把「同视频主干」的字幕 / 封面 / meta 配对到各自视频（缺陷①：收集全部字幕，不只一个）
+    consumed_sub, consumed_cover, consumed_meta = set(), set(), set()
     added = 0
-    for stem, (dest, fname, rid, body_key8) in saved_videos.items():
-        sub_fn = match_subtitle(stem, sub_map) if sub_map else ""
-        extras = [saved_subs[sub_fn]] if sub_fn else []
+    for stem, (dest, fname, rid, body_key8, content_sha256) in saved_videos.items():
+        matched = _match_siblings_by_stem(stem, saved_subs, consumed_sub)
+        matched += _match_siblings_by_stem(stem, saved_covers, consumed_cover)
+        matched += _match_siblings_by_stem(stem, saved_metas, consumed_meta)
         try:
-            _ingest_into_pool(sid, rid, body_key8, dest, extras,
+            _ingest_into_pool(sid, rid, body_key8, dest, matched,
                               _title_from_filename(fname), target_cid=cid,
                               content_sha256=content_sha256)
             added += 1
+            # 视频入池后，把此前先到、暂存于 pending 的字幕 / 封面 / meta 补挂进来
+            _flush_pending_attach(sid, rid, body_key8, stem)
         except HTTPException:
             pass
-    return {"ok": True, "added": added, "total": len(saved_videos)}
+
+    # 未被任何视频配对的字幕 / 封面 / meta → 挂到「已存在的同名资源」，否则进 pending 兜底
+    attached = 0
+    pending = 0
+    for name, path in saved_subs.items():
+        if name in consumed_sub:
+            continue
+        if _attach_siblings_to_existing(sid, name, [path], [], [], cid):
+            attached += 1
+        else:
+            _stage_pending_attach(sid, name, path)
+            pending += 1
+    for name, path in saved_covers.items():
+        if name in consumed_cover:
+            continue
+        if _attach_siblings_to_existing(sid, name, [], [path], [], cid):
+            attached += 1
+        else:
+            _stage_pending_attach(sid, name, path)
+            pending += 1
+    for name, path in saved_metas.items():
+        if name in consumed_meta:
+            continue
+        if _attach_siblings_to_existing(sid, name, [], [], [path], cid):
+            attached += 1
+        else:
+            _stage_pending_attach(sid, name, path)
+            pending += 1
+
+    # skipped：真正被忽略的文件 = 总数 - 视频(新增) - 已补挂 - 待补挂 - 已作为附加物并入视频的同源文件
+    consumed = len(consumed_sub) + len(consumed_cover) + len(consumed_meta)
+    skipped = len(files) - added - attached - pending - consumed
+    return {"ok": True, "added": added, "attached": attached,
+            "pending": pending, "skipped": max(skipped, 0), "total": len(files)}
 
 LLM_BASE_URL = str(cfg.get("llm_base_url") or "").rstrip("/")
 
@@ -3789,11 +3876,13 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
         "title": (title or _title_from_filename(os.path.basename(main_abs))),
         "resource_id": rid,
         "body_key8": body_key8,
+        "media_type": media_type_of(main_abs),  # 前瞻埋点（2026-10-22）：video/audio/text/image
         "vid": vid,
         "seq": seq,
         "duration": None,
         "cover": "",
         "subtitle": "",
+        "meta": "",                       # O3 解耦的 meta.json 衍生物（池内相对路径）
         "added_at": time.time(),
     }
     # 按扩展名归类附加物（R1，2026-10-21）：
@@ -3802,7 +3891,6 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
     #     并以 entry["subtitle_srt"] 记录其池内相对路径（前端按需使用，非 match_subtitle 契约）。
     #   - 封面：.jpg/.jpeg/.png/.webp 作为候选（与显式 cover 字段二选一）。
     # 向后兼容 watcher 三件套 / 老 import-dir（仅字幕） / /api/ingest（subtitle_path+cover）。
-    IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp")
     _extras = list(new_extras or [])
     _txt = next((e for e in _extras if e.lower().endswith(".txt")), "")
     _srt = next((e for e in _extras if e.lower().endswith(".srt")), "")
@@ -3823,10 +3911,166 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
         entry["cover"] = _cache_cover_file(_abs) or _cover_in
     else:
         entry["cover"] = ""
+    # meta.json 衍生物（O3 解耦）：同主干 .json 入池后记录其相对路径，供前端/下游读取资源元数据
+    meta_candidate = next((e for e in _extras if e.lower().endswith(".json")), "")
+    entry["meta"] = meta_candidate
     replaced_rel = _add_to_collection(owner, entry, target_cid)
     # R2（换内容回收，2026-10-21）：登记同 rid 下无引用的旧 body_key8 子目录到回收站（物理保留）。
     _recycle_unreferenced_body_dirs(rid, body_key8)
     return rid, dedup_hit, rel_main, replaced_rel
+
+
+# ===================== 上传 ⑤ attach 补挂 + pending 兜底（2026-10-22） =====================
+# 资源主体-衍生物模型：视频先入池，之后可再传字幕/封面/meta 挂到已存在的资源；
+# 若衍生物先到、资源尚不存在，则暂存 _pending_attach/<归一主干>/，等视频入池后自动补挂。
+
+def _match_siblings_by_stem(stem, bucket, consumed):
+    """在 bucket（basename->abs_path）中找出与视频主干 stem 同名的字幕/封面/meta。
+
+    配对规则与资源池一致：先剥 [BV号]、再剥 _字幕 标记、最后 normalize_stem（去分P序号前缀），
+    相等即视为同源衍生物。命中项记入 consumed，避免被多个视频重复配对。"""
+    nb = _norm_stem(stem)
+    out = []
+    if not nb:
+        return out
+    for name, path in bucket.items():
+        if name in consumed:
+            continue
+        base = os.path.splitext(name)[0]
+        if _norm_stem(base) == nb:
+            out.append(path)
+            consumed.add(name)
+    return out
+
+
+def _find_resource_by_stem(sid, stem):
+    """在本用户所有合集里，按归一主干找到已存在的资源（返回 (rid, body_key8)）。"""
+    nb = _norm_stem(stem)
+    if not nb:
+        return None, None
+    cols = _sid_collections(sid)
+    for c in cols:
+        if c.get("id") == "__trash__":
+            continue
+        for it in c.get("items", []):
+            base = os.path.basename((it.get("rel_path") or "").replace("\\", "/"))
+            ibase = os.path.splitext(base)[0]
+            if (ibase == stem or _norm_stem(ibase) == nb):
+                return it.get("resource_id"), it.get("body_key8")
+    return None, None
+
+
+def _attach_siblings_to_existing(sid, name, subs, covers, metas, target_cid="default"):
+    """把（已无视频同批的）字幕/封面/meta 挂到「已存在的同名资源」。
+
+    定位锚点：归一主干 stem（资源未传 rid 时由文件名推导）。命中后把文件迁入资源池目录，
+    并就地更新该 resource_id 在「本用户所有合集」里的条目（跨合集同步）。
+    返回是否成功挂上（False 表示未找到可挂资源，调用方应转 pending 兜底）。"""
+    if not (subs or covers or metas):
+        return False
+    rid, body_key8 = _find_resource_by_stem(sid, os.path.splitext(name)[0])
+    if not rid or not body_key8:
+        return False
+    _attach_files_into_pool(sid, rid, body_key8, subs, covers, metas)
+    return True
+
+
+def _attach_files_into_pool(sid, rid, body_key8, subs, covers, metas):
+    """把已配对的字幕/封面/meta 迁入资源池目录，并同步更新本用户所有合集中引用该 resource_id 的条目。"""
+    pool_dir = _pool_dir(rid, body_key8)
+    if not os.path.isdir(pool_dir):
+        return
+    moved = []
+    for p in (list(subs) + list(covers) + list(metas)):
+        if not p or not os.path.isfile(p):
+            continue
+        dst = _uniq_path(os.path.join(pool_dir, os.path.basename(p)))
+        try:
+            shutil.move(p, dst)
+            moved.append(os.path.relpath(dst, DOWNLOADS))
+        except Exception:
+            pass
+    if not moved:
+        return
+    rel_subs  = [m for m in moved if m.lower().endswith(SUB_EXTS)]
+    rel_covs  = [m for m in moved if m.lower().endswith(IMG_EXTS)]
+    rel_metas = [m for m in moved if m.lower().endswith(META_EXT)]
+    _update_resource_fields(sid, rid, rel_subs, rel_covs, rel_metas)
+
+
+def _update_resource_fields(sid, rid, subs, covers, metas):
+    """把新挂的字幕/封面/meta 回填到本用户所有合集中引用 resource_id==rid 的条目（跨合集同步）。"""
+    cols = _sid_collections(sid)
+    changed = False
+    for c in cols:
+        if c.get("id") == "__trash__":
+            continue
+        for it in c.get("items", []):
+            if it.get("resource_id") != rid:
+                continue
+            if subs:
+                _txt = next((s for s in subs if s.lower().endswith(".txt")), "")
+                _srt = next((s for s in subs if s.lower().endswith(".srt")), "")
+                if _txt:
+                    it["subtitle"] = _txt
+                if _srt:
+                    it["subtitle_srt"] = _srt
+                if not it.get("subtitle_source"):
+                    it["subtitle_source"] = "official" if it.get("subtitle") else ""
+                changed = True
+            if covers:
+                cov = covers[0]
+                abs_cov = cov if os.path.isabs(cov) else os.path.join(DOWNLOADS, cov)
+                it["cover"] = _cache_cover_file(abs_cov) or cov
+                changed = True
+            if metas:
+                it["meta"] = metas[0]
+                changed = True
+    if changed:
+        _save_collections()
+
+
+def _pending_attach_dir(sid):
+    return os.path.join(user_root(sid), "_pending_attach")
+
+
+def _stage_pending_attach(sid, name, path):
+    """视频尚未入池时，先把字幕/封面/meta 按归一主干存进 pending，待视频入池后补挂。"""
+    nb = _norm_stem(os.path.splitext(name)[0]) or "_unknown"
+    d = os.path.join(_pending_attach_dir(sid), nb)
+    os.makedirs(d, exist_ok=True)
+    try:
+        shutil.move(path, _uniq_path(os.path.join(d, os.path.basename(path))))
+    except Exception:
+        pass
+
+
+def _flush_pending_attach(sid, rid, body_key8, stem):
+    """视频入池后，把 pending 里同主干的字幕/封面/meta 补挂进该资源池目录。"""
+    nb = _norm_stem(stem)
+    if not nb:
+        return
+    target = os.path.join(_pending_attach_dir(sid), nb)
+    if not os.path.isdir(target):
+        return
+    subs, covers, metas = [], [], []
+    for fn in os.listdir(target):
+        fp = os.path.join(target, fn)
+        if not os.path.isfile(fp):
+            continue
+        ext = os.path.splitext(fn)[1].lower()
+        if ext in SUB_EXTS:
+            subs.append(fp)
+        elif ext in IMG_EXTS:
+            covers.append(fp)
+        elif ext in META_EXT:
+            metas.append(fp)
+    if subs or covers or metas:
+        _attach_files_into_pool(sid, rid, body_key8, subs, covers, metas)
+    try:
+        os.rmdir(target)
+    except OSError:
+        pass
 
 
 class IngestReq(BaseModel):
