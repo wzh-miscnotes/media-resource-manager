@@ -488,6 +488,7 @@
         <span class="spacer" data-page-node-id="jMvq2OmtGQmuwKbWzVhWOH"></span>
         <button class="btn-ghost btn-sm hidden" id="btnPruneShared" onclick="pruneShared()" title="从「被共享」中移除已过期 / 对方已取消的条目" data-page-node-id="btnPruneShared">🧹 清理失效</button>
         <button class="btn-ghost btn-sm" onclick="openShareList()" title="管理我生成的全部分享链接" data-page-node-id="shareListBtn">🔗 我的共享</button>
+        <button class="btn-ghost btn-sm" id="btnPending" onclick="openPending()" title="查看未能自动匹配到资源的字幕/封面，可手动挂到资源或丢弃">📎 待补挂<span id="pendingBadge" class="hidden"></span></button>
         <button class="btn-ghost btn-sm" id="btnUpload" onclick="openUpload()" data-page-node-id="tSrfiE3LOHnTkdCjjSf8CI">⬆ 上传</button>
         <button class="btn-ghost btn-sm" id="btnImportDir" onclick="openImportDir()" data-page-node-id="rmImportDir">📂 目录导入</button>
       </div>
@@ -524,6 +525,7 @@
             <a id="dlSubBtn" class="btn-ghost btn-sm" href="#" download data-page-node-id="FE42aNNjtftTGUuqTDY0hZ">⬇ 字幕(TXT)</a>
             <a id="dlSubSrtBtn" class="btn-ghost btn-sm hidden" href="#" download>⬇ 字幕(SRT)</a>
             <a id="dlCoverBtn" class="btn-ghost btn-sm hidden" href="#" download>⬇ 下载封面</a>
+            <button id="dlAttachBtn" class="btn-ghost btn-sm hidden" onclick="openAttachDialog(currentLibItem)">📎 补录字幕/封面</button>
             <span class="muted hidden" id="dlSubStatus" data-page-node-id="B4y9aqtC4RDeyy16q7kcES"></span>
           </div>
           <!-- AI 文章 / 字幕原文：直接置于视频下方，可伸缩折叠（懒加载） -->
@@ -592,6 +594,36 @@
           <span id="importDirMsg" class="muted"></span>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- A：定向补录弹窗（按 resource_id 直接绑定，不走文件名匹配） -->
+  <div class="modal-mask hidden" id="attachMask" onclick="if(event.target===this)closeAttach()">
+    <div class="modal" style="width:min(540px,96vw)">
+      <div class="modal-head">
+        <div class="mt">📎 补录字幕 / 封面</div>
+        <button class="btn-ghost btn-sm" onclick="closeAttach()">关闭</button>
+      </div>
+      <div class="modal-body" style="flex-direction:column;padding:14px;gap:12px">
+        <div class="muted" id="attachTarget"></div>
+        <input type="file" id="attachFiles" multiple accept=".srt,.vtt,.ass,.lrc,.txt,.jpg,.jpeg,.png,.webp,.json">
+        <p class="muted" style="margin:0;line-height:1.6">直接绑定到当前资源，<b>不需要文件名匹配</b>。可同时选 <code>.txt</code> + <code>.srt</code> 作为双字幕，图片作封面；视频不会在此处导入。</p>
+        <div style="display:flex;gap:10px;align-items:center">
+          <button class="btn-primary btn-sm" id="attachSubmit" onclick="doAttach()">开始补录</button>
+          <span id="attachMsg" class="muted"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- B：待补挂可视化（未能自动匹配的孤儿衍生物） -->
+  <div class="modal-mask hidden" id="pendingMask" onclick="if(event.target===this)closePending()">
+    <div class="modal" style="width:min(680px,96vw)">
+      <div class="modal-head">
+        <div class="mt">📎 待补挂的衍生物</div>
+        <button class="btn-ghost btn-sm" onclick="closePending()">关闭</button>
+      </div>
+      <div class="modal-body" id="pendingBody" style="flex-direction:column;padding:14px;gap:10px"></div>
     </div>
   </div>
 
@@ -799,6 +831,7 @@
           <a id="plpDlSubSrt" class="btn-ghost btn-sm hidden" href="#" download>⬇ 字幕(SRT)</a>
           <a id="plpDlCover" class="btn-ghost btn-sm hidden" href="#" download>⬇ 下载封面</a>
           <a id="plpDlArt" class="btn-ghost btn-sm hidden" href="#" download>⬇ 导出文章</a>
+          <button id="plpAttach" class="btn-ghost btn-sm hidden" onclick="openAttachDialog(_ppItems[_ppIdx])">📎 补录字幕/封面</button>
           <a id="plpBack" class="btn-ghost btn-sm" href="/">← 返回媒体库</a>
         </div>
       </div>
@@ -1119,6 +1152,7 @@ async function renderLibGrid(){
     };
   });
   updateBatchBar();
+  refreshPendingBadge();
 }
 
 /* ---- 「被共享」合集辅助 ---- */
@@ -1142,6 +1176,13 @@ function _applyCoverDl(btnId, item){
   const c = _coverDl(item);
   if(c){ btn.classList.remove("hidden"); btn.href = c.url; btn.download = c.name; }
   else { btn.classList.add("hidden"); btn.removeAttribute("href"); }
+}
+/* 补录入口：仅自有资源（有 resource_id 且非共享）可见 */
+function _applyAttachBtn(btnId, item){
+  const btn = document.getElementById(btnId);
+  if(!btn) return;
+  const ok = item && item.resource_id && !item.shared;
+  btn.classList.toggle("hidden", !ok);
 }
 function _shareBadge(it){
   const st = it.share_status || "active";
@@ -2233,6 +2274,7 @@ function playLibItem(i){
     dlSubSrt.classList.add("hidden");
   }
   _applyCoverDl("dlCoverBtn", it);
+  _applyAttachBtn("dlAttachBtn", it);
 
   renderPlaylist(items, i);
   renderPlayerExtras(it);
@@ -2524,6 +2566,124 @@ async function doUpload(){
     xhr.open("POST", "/api/upload");
     xhr.send(fd);
   });
+}
+
+/* ==================== A：定向补录（按 rid 直接绑定，不走文件名匹配） ==================== */
+let _attachItem = null;
+
+function openAttachDialog(it){
+  if(!it){ alert("请先选择一个资源"); return; }
+  if(it.shared){ alert("这是别人共享给你的资源，只读，无法补录。"); return; }
+  if(!it.resource_id){ alert("该资源缺少 resource_id，无法补录。"); return; }
+  _attachItem = it;
+  document.getElementById("attachTarget").textContent = "目标资源：" + (it.title || it.rel_path);
+  document.getElementById("attachMsg").textContent = "";
+  document.getElementById("attachFiles").value = "";
+  document.getElementById("attachMask").classList.remove("hidden");
+}
+
+function closeAttach(){ document.getElementById("attachMask").classList.add("hidden"); }
+
+async function doAttach(){
+  if(!_attachItem) return;
+  const input = document.getElementById("attachFiles");
+  const msg = document.getElementById("attachMsg");
+  const btn = document.getElementById("attachSubmit");
+  if(!input.files.length){ alert("请先选择字幕或封面文件"); return; }
+  const fd = new FormData();
+  for(const f of input.files) fd.append("files", f);
+  btn.disabled = true; msg.textContent = "补录中…";
+  try{
+    const r = await fetch("/api/resource/" + encodeURIComponent(_attachItem.resource_id) + "/attach", {method:"POST", body:fd});
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.detail || ("HTTP " + r.status));
+    const parts = [];
+    if(j.attached) parts.push(`已补录 ${j.attached} 个文件`);
+    if(j.skipped && j.skipped.length) parts.push(`忽略 ${j.skipped.length} 个非衍生物`);
+    msg.textContent = parts.join("，") || "没有可补录的文件";
+    setTimeout(()=>{ closeAttach(); loadLibrary(); }, 700);
+  }catch(e){
+    msg.textContent = "补录失败：" + (e.message || e);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+/* ==================== B：待补挂可视化（孤儿衍生物） ==================== */
+let _pendingItems = [];
+
+async function refreshPendingBadge(){
+  try{
+    const j = await fetch("/api/pending-attach").then(r=>r.json());
+    const n = (j.items || []).reduce((a,x)=>a+(x.count||0),0);
+    const b = document.getElementById("pendingBadge");
+    if(!b) return;
+    if(n){ b.textContent = " " + n; b.classList.remove("hidden"); }
+    else { b.textContent = ""; b.classList.add("hidden"); }
+  }catch(_){}
+}
+
+async function openPending(){
+  let items = [];
+  try{ items = (await fetch("/api/pending-attach").then(r=>r.json())).items || []; }catch(_){}
+  _pendingItems = items;
+  renderPending();
+  document.getElementById("pendingMask").classList.remove("hidden");
+}
+
+function closePending(){ document.getElementById("pendingMask").classList.add("hidden"); }
+
+function renderPending(){
+  const body = document.getElementById("pendingBody");
+  if(!_pendingItems.length){
+    body.innerHTML = '<div class="muted">没有待补挂文件。所有字幕 / 封面都已匹配到资源。</div>';
+    return;
+  }
+  const opts = currentCollItems().filter(it=>it.resource_id && !it.shared)
+    .map(it=>`<option value="${esc(it.resource_id)}">${esc(it.title || it.rel_path)}</option>`).join("");
+  body.innerHTML = _pendingItems.map((it, idx)=>{
+    const fl = it.files.map(f=>`${esc(f.name)} <span class="muted">(${fmtSize(f.size)})</span>`).join(" · ");
+    return `<div style="border:1px solid var(--line);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:8px">
+      <div style="font-weight:600;font-size:13.5px">${esc(it.stem)}</div>
+      <div class="muted" style="font-size:12.5px;line-height:1.6">${fl}</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="pdSel_${idx}" style="flex:1;min-width:180px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fbfcfe;color:var(--text)">${opts || '<option value="">（当前合集无可选资源）</option>'}</select>
+        <button class="btn-ghost btn-sm" onclick="resolvePending(${idx})">挂到所选资源</button>
+        <button class="btn-ghost btn-sm" onclick="deletePending(${idx})">丢弃</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+async function resolvePending(idx){
+  const it = _pendingItems[idx];
+  if(!it) return;
+  const sel = document.getElementById("pdSel_" + idx);
+  const rid = sel && sel.value;
+  if(!rid){ alert("请先选择目标资源"); return; }
+  try{
+    const r = await fetch("/api/pending-attach/resolve", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({stem: it.stem, rid})
+    });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.detail || ("HTTP " + r.status));
+    await openPending(); refreshPendingBadge(); loadLibrary();
+  }catch(e){ alert("挂载失败：" + (e.message || e)); }
+}
+
+async function deletePending(idx){
+  const it = _pendingItems[idx];
+  if(!it) return;
+  if(!confirm(`确认丢弃「${it.stem}」下的 ${it.count} 个文件？此操作不可恢复。`)) return;
+  try{
+    const r = await fetch("/api/pending-attach/delete", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({stem: it.stem})
+    });
+    if(!r.ok){ const j = await r.json().catch(()=>({})); throw new Error(j.detail || ("HTTP " + r.status)); }
+    await openPending(); refreshPendingBadge();
+  }catch(e){ alert("丢弃失败：" + (e.message || e)); }
 }
 
 /* ==================== 资源级共享（方案 A：仅系统用户 + 链接制） ==================== */
@@ -3009,6 +3169,7 @@ function showPlayPageItem(i){
     dlSs.download = (it.subtitle_srt || "").split("/").pop() || "subtitle.srt";
   } else dlSs.classList.add("hidden");
   _applyCoverDl("plpDlCover", it);
+  _applyAttachBtn("plpAttach", it);
   const arts = _plArtList(it);
   const dlA = document.getElementById("plpDlArt");
   if(arts.length){

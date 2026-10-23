@@ -4180,6 +4180,134 @@ def _flush_pending_attach(sid, rid, body_key8, stem):
         pass
 
 
+# ===================== A：定向补录（按 rid 直接绑定，2026-10-23） =====================
+# 上传时的自动配对靠「文件名主干相同」，用户在补封面/字幕时很容易配不上而落入 pending。
+# 本接口绕开文件名匹配，直接把衍生物绑定到用户显式指定的 resource_id。
+
+def _body_key8_for_rid(sid, rid):
+    """在本用户所有合集（不含回收站）里按 resource_id 反查 body_key8。"""
+    if not rid:
+        return None
+    for c in _sid_collections(sid):
+        if c.get("id") == "__trash__":
+            continue
+        for it in c.get("items", []):
+            if (it.get("resource_id") or "") == rid and it.get("body_key8"):
+                return it.get("body_key8")
+    return None
+
+
+class PendingResolveReq(BaseModel):
+    stem: str
+    rid: str = ""
+
+
+@app.post("/api/resource/{rid}/attach")
+async def attach_to_resource(
+    rid: str,
+    files: list[UploadFile] = File(...),
+    sid: str = Depends(current_identity),
+):
+    """定向补录：把字幕 / 封面 / meta 直接挂到指定资源（不依赖文件名匹配）。
+
+    只接收衍生物；视频/音频与其他类型一律忽略（补录不新建资源）。
+    """
+    body_key8 = _body_key8_for_rid(sid, rid)
+    if not body_key8:
+        raise HTTPException(status_code=404, detail="资源不存在或无权操作")
+    if not os.path.isdir(_pool_dir(rid, body_key8)):
+        raise HTTPException(status_code=404, detail="资源池目录不存在（可能已被清理）")
+    stage_dir = os.path.join(user_root(sid), "_staging")
+    os.makedirs(stage_dir, exist_ok=True)
+    subs, covers, metas, skipped = [], [], [], []
+    for f in files:
+        ext = os.path.splitext(f.filename or "")[1].lower()
+        if ext not in SUB_EXTS and ext not in IMG_EXTS and ext not in META_EXT:
+            skipped.append(f.filename or "")
+            continue
+        try:
+            data = await f.read()
+        except Exception:
+            skipped.append(f.filename or "")
+            continue
+        safe = _safe_upload_name(f.filename)
+        dest = _uniq_path(os.path.join(stage_dir, safe))
+        with open(dest, "wb") as w:
+            w.write(data)
+        if ext in SUB_EXTS:
+            subs.append(dest)
+        elif ext in IMG_EXTS:
+            covers.append(dest)
+        else:
+            metas.append(dest)
+    attached = len(subs) + len(covers) + len(metas)
+    if attached:
+        _attach_files_into_pool(sid, rid, body_key8, subs, covers, metas)
+    return {"ok": True, "attached": attached, "skipped": skipped,
+            "rid": rid}
+
+
+# ===================== B：pending 可视化（列表 / 手动挂载 / 丢弃，2026-10-23） =====================
+# 历史遗留的 _pending_attach 目录对用户完全不可见，这里把它暴露出来并允许人工处置。
+
+@app.get("/api/pending-attach")
+def pending_attach_list(sid: str = Depends(current_identity)):
+    """列出 _pending_attach 下所有暂存主干及其文件。"""
+    root = _pending_attach_dir(sid)
+    out = []
+    if os.path.isdir(root):
+        for stem in sorted(os.listdir(root)):
+            d = os.path.join(root, stem)
+            if not os.path.isdir(d):
+                continue
+            files = []
+            for fn in sorted(os.listdir(d)):
+                fp = os.path.join(d, fn)
+                if os.path.isfile(fp):
+                    files.append({"name": fn, "size": os.path.getsize(fp)})
+            if files:
+                out.append({"stem": stem, "files": files, "count": len(files)})
+    return {"ok": True, "items": out}
+
+
+@app.post("/api/pending-attach/resolve")
+def pending_attach_resolve(req: PendingResolveReq, sid: str = Depends(current_identity)):
+    """把某个待补挂主干下的文件，手动挂到指定资源。"""
+    d = os.path.join(_pending_attach_dir(sid), os.path.basename(req.stem))
+    if not os.path.isdir(d):
+        raise HTTPException(status_code=404, detail="待补挂目录不存在")
+    body_key8 = _body_key8_for_rid(sid, req.rid)
+    if not body_key8:
+        raise HTTPException(status_code=404, detail="目标资源不存在或无权操作")
+    subs, covers, metas = [], [], []
+    for fn in os.listdir(d):
+        fp = os.path.join(d, fn)
+        if not os.path.isfile(fp):
+            continue
+        ext = os.path.splitext(fn)[1].lower()
+        if ext in SUB_EXTS:
+            subs.append(fp)
+        elif ext in IMG_EXTS:
+            covers.append(fp)
+        elif ext in META_EXT:
+            metas.append(fp)
+    n = len(subs) + len(covers) + len(metas)
+    if n:
+        _attach_files_into_pool(sid, req.rid, body_key8, subs, covers, metas)
+    shutil.rmtree(d, ignore_errors=True)
+    return {"ok": True, "attached": n, "rid": req.rid}
+
+
+@app.post("/api/pending-attach/delete")
+def pending_attach_delete(req: PendingResolveReq, sid: str = Depends(current_identity)):
+    """丢弃某个待补挂主干（物理删除暂存目录）。"""
+    d = os.path.join(_pending_attach_dir(sid), os.path.basename(req.stem))
+    if not os.path.isdir(d):
+        raise HTTPException(status_code=404, detail="待补挂目录不存在")
+    shutil.rmtree(d, ignore_errors=True)
+    return {"ok": True, "deleted": req.stem}
+
+
 class IngestReq(BaseModel):
     user: str = ""
     rid: str
