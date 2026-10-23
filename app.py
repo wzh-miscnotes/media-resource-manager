@@ -1764,6 +1764,7 @@ def share_info(token: str, sid: str = Depends(current_identity)):
         "subtitle": (item or {}).get("subtitle", ""),
         "subtitle_srt": ((item or {}).get("subtitle_srt") or _subtitle_srt_rel((item or {}).get("subtitle", ""))),
         "subtitle_source": (item or {}).get("subtitle_source", ""),
+        "cover": (item or {}).get("cover", ""),
         "article_rel": article_rel,
         "article_filename": article_filename,
         "article_bold": (_article_bold_for(
@@ -4082,6 +4083,35 @@ def _attach_siblings_to_existing(sid, name, subs, covers, metas, target_cid="def
     return True
 
 
+def _prune_pool_files(pool_dir, exts, keep_rels=None):
+    """删除池根目录下指定扩展名的文件（keep_rels 除外）——更换封面 / 删除衍生物时清理孤儿。
+
+    池目录与资源一一对应：池根一级的图片即该资源的封面、字幕类文本即其字幕。
+    重复上传封面时旧文件若不清理会堆积成孤儿（covers[0] 取新不取旧，旧文件永无引用）。
+    仅删池根一级的普通文件，不碰子目录（如 users/<hash>/ 文章目录）。
+    """
+    if not pool_dir or not os.path.isdir(pool_dir):
+        return 0
+    keep = set()
+    for r in (keep_rels or []):
+        keep.add(os.path.basename((r or "").replace("\\", "/")))
+    removed = 0
+    try:
+        for fn in os.listdir(pool_dir):
+            fp = os.path.join(pool_dir, fn)
+            if not os.path.isfile(fp) or fn in keep:
+                continue
+            if os.path.splitext(fn)[1].lower() in exts:
+                try:
+                    os.remove(fp)
+                    removed += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return removed
+
+
 def _attach_files_into_pool(sid, rid, body_key8, subs, covers, metas):
     """把已配对的字幕/封面/meta 迁入资源池目录，并同步更新本用户所有合集中引用该 resource_id 的条目。"""
     pool_dir = _pool_dir(rid, body_key8)
@@ -4102,6 +4132,9 @@ def _attach_files_into_pool(sid, rid, body_key8, subs, covers, metas):
     rel_subs  = [m for m in moved if m.lower().endswith(SUB_EXTS)]
     rel_covs  = [m for m in moved if m.lower().endswith(IMG_EXTS)]
     rel_metas = [m for m in moved if m.lower().endswith(META_EXT)]
+    if rel_covs:
+        # 更换封面语义：新封面上传即替换，清掉池根旧封面避免孤儿堆积
+        _prune_pool_files(pool_dir, IMG_EXTS, keep_rels=rel_covs)
     _update_resource_fields(sid, rid, rel_subs, rel_covs, rel_metas)
 
 
@@ -4244,6 +4277,52 @@ async def attach_to_resource(
     if attached:
         _attach_files_into_pool(sid, rid, body_key8, subs, covers, metas)
     return {"ok": True, "attached": attached, "skipped": skipped,
+            "rid": rid}
+
+
+class DetachReq(BaseModel):
+    kind: str = "subtitle"  # subtitle=删除字幕（txt/srt 及池内字幕类文件）；cover=删除封面
+
+
+@app.post("/api/resource/{rid}/detach")
+def detach_from_resource(rid: str, req: DetachReq, sid: str = Depends(current_identity)):
+    """删除资源的字幕或封面：清空合集中的字段引用 + 清理池根对应文件（不可恢复）。
+
+    与补录（attach）互补：补录管「挂上」，本接口管「摘下」。
+    删除字幕会同时清掉 subtitle/subtitle_srt/subtitle_source 三个字段；
+    删除封面清掉 cover 字段。池内文件一并物理删除，避免孤儿。
+    """
+    kind = (req.kind or "").strip().lower()
+    if kind not in ("subtitle", "cover"):
+        raise HTTPException(status_code=400, detail="kind 仅支持 subtitle / cover")
+    body_key8 = _body_key8_for_rid(sid, rid)
+    if not body_key8:
+        raise HTTPException(status_code=404, detail="资源不存在或无权操作")
+    pool_dir = _pool_dir(rid, body_key8)
+    exts = SUB_EXTS if kind == "subtitle" else IMG_EXTS
+    removed = _prune_pool_files(pool_dir, exts)
+    cols = _sid_collections(sid)
+    cleared = 0
+    for c in cols:
+        if c.get("id") == "__trash__":
+            continue
+        for it in c.get("items", []):
+            if it.get("resource_id") != rid:
+                continue
+            if kind == "subtitle":
+                if not (it.get("subtitle") or it.get("subtitle_srt")):
+                    continue
+                it["subtitle"] = ""
+                it["subtitle_srt"] = ""
+                it["subtitle_source"] = ""
+            else:
+                if not it.get("cover"):
+                    continue
+                it["cover"] = ""
+            cleared += 1
+    if cleared:
+        _save_collections()
+    return {"ok": True, "kind": kind, "removed": removed, "cleared": cleared,
             "rid": rid}
 
 

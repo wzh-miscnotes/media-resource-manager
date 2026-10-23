@@ -606,8 +606,9 @@
       </div>
       <div class="modal-body" style="flex-direction:column;padding:14px;gap:12px">
         <div class="muted" id="attachTarget"></div>
+        <div id="attachCurrent" class="muted" style="line-height:1.8;display:none;flex-direction:column;gap:6px"></div>
         <input type="file" id="attachFiles" multiple accept=".srt,.vtt,.ass,.lrc,.txt,.jpg,.jpeg,.png,.webp,.json">
-        <p class="muted" style="margin:0;line-height:1.6">直接绑定到当前资源，<b>不需要文件名匹配</b>。可同时选 <code>.txt</code> + <code>.srt</code> 作为双字幕，图片作封面；视频不会在此处导入。</p>
+        <p class="muted" style="margin:0;line-height:1.6">直接绑定到当前资源，<b>不需要文件名匹配</b>。可同时选 <code>.txt</code> + <code>.srt</code> 作为双字幕，图片作封面（<b>再次上传封面会自动替换旧封面</b>）；视频不会在此处导入。</p>
         <div style="display:flex;gap:10px;align-items:center">
           <button class="btn-primary btn-sm" id="attachSubmit" onclick="doAttach()">开始补录</button>
           <span id="attachMsg" class="muted"></span>
@@ -798,6 +799,7 @@
       <video id="spVideo" controls preload="metadata"></video>
       <div class="sp-actions">
         <a id="spDlVideo" class="btn-ghost btn-sm" href="#" download>⬇ 保存视频</a>
+        <a id="spDlCover" class="btn-ghost btn-sm hidden" href="#" download>⬇ 封面图</a>
         <a id="spDlSub" class="btn-ghost btn-sm hidden" href="#" download>⬇ 字幕(TXT)</a>
         <a id="spDlSubSrt" class="btn-ghost btn-sm hidden" href="#" download>⬇ 字幕(SRT)</a>
         <a id="spDlArt" class="btn-ghost btn-sm hidden" href="#" download>⬇ 导出文章</a>
@@ -2579,7 +2581,30 @@ function openAttachDialog(it){
   document.getElementById("attachTarget").textContent = "目标资源：" + (it.title || it.rel_path);
   document.getElementById("attachMsg").textContent = "";
   document.getElementById("attachFiles").value = "";
+  _renderAttachCurrent(it);
   document.getElementById("attachMask").classList.remove("hidden");
+}
+
+/* 补录弹窗「现有衍生物」状态区：展示当前字幕/封面，提供删除入口（与补录互补） */
+function _renderAttachCurrent(it){
+  const box = document.getElementById("attachCurrent");
+  const rows = [];
+  if(it.subtitle){
+    const nm = (it.subtitle || "").split("/").pop();
+    rows.push(`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span>📝 现有字幕：<code>${esc(nm)}</code></span>` +
+      `<button class="btn-ghost btn-sm" style="color:var(--err)" onclick="doDetach('subtitle')" title="删除字幕字段并清理池内字幕文件，不可恢复">🗑 删除字幕</button></div>`);
+  }
+  if(it.cover){
+    rows.push(`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span>🖼 现有封面：已设置</span>` +
+      `<button class="btn-ghost btn-sm" style="color:var(--err)" onclick="doDetach('cover')" title="删除封面字段并清理池内封面文件，不可恢复">🗑 删除封面</button></div>`);
+  }
+  if(rows.length){
+    box.innerHTML = rows.join("");
+    box.style.display = "flex";
+  } else {
+    box.innerHTML = "";
+    box.style.display = "none";
+  }
 }
 
 function closeAttach(){ document.getElementById("attachMask").classList.add("hidden"); }
@@ -2606,6 +2631,27 @@ async function doAttach(){
     msg.textContent = "补录失败：" + (e.message || e);
   }finally{
     btn.disabled = false;
+  }
+}
+
+/* 删除现有字幕/封面（与补录互补）：清字段 + 清理池内文件，不可恢复 */
+async function doDetach(kind){
+  if(!_attachItem) return;
+  const label = kind === "subtitle" ? "字幕" : "封面";
+  if(!confirm(`确定删除当前资源的${label}吗？\n将同时清理资源池内的对应文件，此操作不可恢复。`)) return;
+  const msg = document.getElementById("attachMsg");
+  msg.textContent = "删除中…";
+  try{
+    const r = await fetch("/api/resource/" + encodeURIComponent(_attachItem.resource_id) + "/detach", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({kind})
+    });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.detail || ("HTTP " + r.status));
+    msg.textContent = `已删除${label}` + (j.removed ? `（清理 ${j.removed} 个池内文件）` : "");
+    setTimeout(()=>{ closeAttach(); loadLibrary(); }, 600);
+  }catch(e){
+    msg.textContent = "删除失败：" + (e.message || e);
   }
 }
 
@@ -2975,6 +3021,16 @@ async function initShareMode(){
     v.src = vsrc;
     const dlV = document.getElementById("spDlVideo");
     dlV.href = vsrc; dlV.download = (j.rel_path || "").split("/").pop() || "video.mp4";
+    // 封面下载：cover 为缩略图缓存文件名（md5[:12]+ext），经 /api/thumbnail-cache/ 提供
+    const dlC = document.getElementById("spDlCover");
+    if(j.cover){
+      dlC.classList.remove("hidden");
+      dlC.href = "/api/thumbnail-cache/" + encodeURIComponent(j.cover);
+      const cExt = (j.cover.match(/\.(jpg|jpeg|png|webp)$/i) || [".jpg"])[0];
+      dlC.download = ((j.title || "cover").replace(/[\/\\:*?"<>|]/g, "_").slice(0, 50) || "cover") + cExt;
+    } else {
+      dlC.classList.add("hidden");
+    }
     if(j.subtitle){
       const dlS = document.getElementById("spDlSub");
       dlS.classList.remove("hidden");
