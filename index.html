@@ -523,6 +523,7 @@
             <a id="dlVideoBtn" class="btn-ghost btn-sm" href="#" download data-page-node-id="dVp7a9Je6j4vkt7VAxaCcT">⬇ 保存视频</a>
             <a id="dlSubBtn" class="btn-ghost btn-sm" href="#" download data-page-node-id="FE42aNNjtftTGUuqTDY0hZ">⬇ 字幕(TXT)</a>
             <a id="dlSubSrtBtn" class="btn-ghost btn-sm hidden" href="#" download>⬇ 字幕(SRT)</a>
+            <a id="dlCoverBtn" class="btn-ghost btn-sm hidden" href="#" download>⬇ 下载封面</a>
             <span class="muted hidden" id="dlSubStatus" data-page-node-id="B4y9aqtC4RDeyy16q7kcES"></span>
           </div>
           <!-- AI 文章 / 字幕原文：直接置于视频下方，可伸缩折叠（懒加载） -->
@@ -796,6 +797,7 @@
           <a id="plpDlVideo" class="btn-ghost btn-sm" href="#" download>⬇ 保存视频</a>
           <a id="plpDlSub" class="btn-ghost btn-sm hidden" href="#" download>⬇ 字幕(TXT)</a>
           <a id="plpDlSubSrt" class="btn-ghost btn-sm hidden" href="#" download>⬇ 字幕(SRT)</a>
+          <a id="plpDlCover" class="btn-ghost btn-sm hidden" href="#" download>⬇ 下载封面</a>
           <a id="plpDlArt" class="btn-ghost btn-sm hidden" href="#" download>⬇ 导出文章</a>
           <a id="plpBack" class="btn-ghost btn-sm" href="/">← 返回媒体库</a>
         </div>
@@ -1123,6 +1125,23 @@ async function renderLibGrid(){
 // 共享文件不在自己的目录下，取流必须带 ?share=token 才被放行
 function _shareUrl(it){
   return "/api/files/" + encodeURI(it.rel_path) + "?share=" + encodeURIComponent(it.share_token || "");
+}
+/* 封面下载：item.cover 是缩略图缓存文件名（md5+ext），统一走 /api/thumbnail-cache/。
+   下载名用「标题 + 原扩展名」，避免用户拿到一串 md5 文件名。 */
+function _coverDl(item){
+  const c = (item && item.cover) || "";
+  if(!c) return null;
+  const ext = (c.match(/\.[a-z0-9]{2,5}$/i) || [".webp"])[0];
+  const base = String((item && (item.title || item.rel_path)) || "cover")
+    .replace(/[\\/:*?"<>|]+/g, "_").trim().slice(0, 80) || "cover";
+  return { url: "/api/thumbnail-cache/" + encodeURIComponent(c), name: base + ext };
+}
+function _applyCoverDl(btnId, item){
+  const btn = document.getElementById(btnId);
+  if(!btn) return;
+  const c = _coverDl(item);
+  if(c){ btn.classList.remove("hidden"); btn.href = c.url; btn.download = c.name; }
+  else { btn.classList.add("hidden"); btn.removeAttribute("href"); }
 }
 function _shareBadge(it){
   const st = it.share_status || "active";
@@ -2213,6 +2232,7 @@ function playLibItem(i){
   } else {
     dlSubSrt.classList.add("hidden");
   }
+  _applyCoverDl("dlCoverBtn", it);
 
   renderPlaylist(items, i);
   renderPlayerExtras(it);
@@ -2988,6 +3008,7 @@ function showPlayPageItem(i){
       + (it.share_token ? ("?share=" + encodeURIComponent(it.share_token)) : "");
     dlSs.download = (it.subtitle_srt || "").split("/").pop() || "subtitle.srt";
   } else dlSs.classList.add("hidden");
+  _applyCoverDl("plpDlCover", it);
   const arts = _plArtList(it);
   const dlA = document.getElementById("plpDlArt");
   if(arts.length){

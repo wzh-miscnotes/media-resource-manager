@@ -1082,23 +1082,25 @@ def _resource_paths(owner, rid):
                 if it.get("subtitle"):
                     sub = it["subtitle"].replace("\\", "/")
                     paths.add(sub)
-                    art = _article_rel_for_subtitle(owner, it.get("subtitle"))
-                    if art:
-                        paths.add(art)
+                    arts = _article_rels_for_resource(it.get("resource_id"), it.get("body_key8"), owner)
+                    if arts:
+                        paths.update(arts)
     return paths
 
 def _article_rel_for_subtitle(owner, subtitle_rel):
-    """给定 owner 与字幕 rel_path，反查其 AI 文章 .md 的 DOWNLOADS 相对路径；无则 None。
-
-    文章索引（index.json）按 stem 存，且每条带来源字幕 rel_path（= 视频束的 subtitle），
-    故可据此把「关联文章」纳入视频束共享范围。"""
+    """【C 方案兼容保留】给定 owner 与字幕 rel_path，反查其 AI 文章 .md 的 DOWNLOADS 相对路径；无则 None。
+    优先按资源定位（resources/<rid>/<body>/users/<hash>/），无 rid/body 时回退旧 _articles/users/<hash>/。"""
     if not owner or not subtitle_rel:
         return None
     idx = _load_article_index(owner)
     sub_norm = subtitle_rel.replace("\\", "/")
     for stem, meta in idx.items():
         if (meta.get("rel_path") or "").replace("\\", "/") == sub_norm:
-            p = os.path.join(_article_art_dir(owner), stem + ".md")
+            _r, _b = meta.get("resource_id"), meta.get("body_key8")
+            if _r and _b:
+                p = os.path.join(_article_resource_md_dir(_r, _b, owner), stem + ".md")
+            else:
+                p = os.path.join(_article_art_dir(owner), stem + ".md")
             if os.path.isfile(p):
                 return os.path.relpath(p, DOWNLOADS).replace("\\", "/")
     return None
@@ -1428,8 +1430,10 @@ def _shared_with_me_collection(identity):
         exists = bool(rel) and os.path.isfile(os.path.join(DOWNLOADS, rel))
         # 关联 AI 文章：优先接收方自己基于该字幕生成的文章（落在接收方目录），
         # 其次回退共享者(owner)已生成的文章（共享视频也能生成文章，自己没写时看对方的）。
-        art_rel_owner = _article_rel_for_subtitle(owner, sub) if (owner and sub) else None
-        art_rel_self = _article_rel_for_subtitle(identity, sub) if sub else None
+        arts_owner = _article_rels_for_resource(rid, src.get("body_key8"), owner) if owner else []
+        arts_self = _article_rels_for_resource(rid, src.get("body_key8"), identity) if (identity and identity != owner) else []
+        art_rel_owner = arts_owner[0] if arts_owner else ""
+        art_rel_self = arts_self[0] if arts_self else ""
         # 接收方优先展示"自己基于共享字幕生成的文章"；自己没生成时回退展示对方的文章
         art_rel = art_rel_self or art_rel_owner
         art_owner = identity if art_rel_self else (owner if art_rel_owner else None)
@@ -1745,9 +1749,10 @@ def share_info(token: str, sid: str = Depends(current_identity)):
     # 关联 AI 文章：按视频束 subtitle 反查 .md，纳入分享页下载入口
     article_rel = None
     article_filename = None
-    if (item or {}).get("subtitle"):
-        article_rel = _article_rel_for_subtitle(owner, item.get("subtitle"))
-        if article_rel:
+    if rid:
+        _arts = _article_rels_for_resource(rid, (item or {}).get("body_key8"), owner)
+        if _arts:
+            article_rel = _arts[0]
             article_filename = os.path.basename(article_rel)
     return {
         "ok": True,
@@ -2442,6 +2447,59 @@ def _article_art_dir(sid):
     d = os.path.join(ARTICLES_DIR, "users", user_hash(sid))
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def _rid_body_from_rel(rel):
+    """从字幕/资源 rel_path 解析 (rid, body_key8)。rel 形如 resources/<rid>/<body>/<stem>.txt。
+    C 方案文章实体按此定位到资源 body 目录下的用户子桶。无法解析时返回 (None, None)。"""
+    parts = (rel or "").replace("\\", "/").split("/")
+    if len(parts) >= 3 and parts[0] == "resources":
+        return parts[1], parts[2]
+    return None, None
+
+
+def _article_resource_md_dir(rid, body_key8, sid):
+    """C 方案：文章 .md 实体物理共置于资源 body 目录下的「用户子桶」，随资源删除级联回收。
+    路径：RESOURCES_DIR/<rid>/<body_key8>/users/<user_hash(sid)>/"""
+    d = os.path.join(RESOURCES_DIR, rid, body_key8, "users", user_hash(sid))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _article_rels_for_resource(rid, body_key8=None, sid=None):
+    """C 方案：返回某资源下 AI 文章 .md 的 DOWNLOADS 相对路径列表。
+    文章索引集中存于用户级 _articles/users/<hash>/index.json（便于列举），文章实体 .md 则物理共置于
+    resources/<rid>/<body>/users/<hash>/（随资源删除级联回收）。本函数按 resource_id（及可选 body_key8）
+    从用户级索引筛出该资源的文章条目，再用 resources 目录拼出 .md 相对路径。
+    - sid 给定：只返回该用户桶内的文章（多用户各自生成、互不串）。
+    - sid 为 None：返回该资源下所有用户桶的文章（用于共享资源聚合）。"""
+    if not rid:
+        return []
+    if sid is not None:
+        hashes = [user_hash(sid)]
+    else:
+        users_base = os.path.join(ARTICLES_DIR, "users")
+        hashes = os.listdir(users_base) if os.path.isdir(users_base) else []
+    out = []
+    for h in hashes:
+        idx_p = os.path.join(ARTICLES_DIR, "users", h, "index.json")
+        try:
+            idx = json.load(open(idx_p, encoding="utf-8"))
+        except Exception:
+            idx = {}
+        for stem, meta in idx.items():
+            if meta.get("resource_id") != rid:
+                continue
+            if body_key8 and meta.get("body_key8") != body_key8:
+                continue
+            _r, _b = meta.get("resource_id"), meta.get("body_key8")
+            if not (_r and _b):
+                continue
+            md = os.path.join(RESOURCES_DIR, _r, _b, "users", h, stem + ".md")
+            if os.path.isfile(md):
+                out.append(os.path.relpath(md, DOWNLOADS).replace("\\", "/"))
+    return out
+
 
 def _article_stem(task_id):
     """校验并归一化文章文件名 stem：禁止路径穿越，允许中文等任意非危险字符。"""
@@ -3179,7 +3237,11 @@ def _run_article_task(task_id):
 
         article = result.strip()
         hit, total, bad = _bold_fidelity(article, text)
-        dest = os.path.join(_article_art_dir(cur["sid"]), task_id + ".md")
+        _a_rid, _a_body = _rid_body_from_rel(cur.get("rel_path"))
+        if _a_rid and _a_body:
+            dest = os.path.join(_article_resource_md_dir(_a_rid, _a_body, cur["sid"]), task_id + ".md")
+        else:
+            dest = os.path.join(_article_art_dir(cur["sid"]), task_id + ".md")
         with open(dest, "w", encoding="utf-8") as f:
             f.write(article + "\n")
         base = os.path.splitext(cur.get("src_name") or "article")[0]
@@ -3193,10 +3255,19 @@ def _run_article_task(task_id):
         try:
             with _ARTICLE_TASKS_LOCK:
                 idx = _load_article_index(cur["sid"])
+                # C 方案：显式绑定 resource_id/body_key8（消除 rel_path 反查脆弱）+ owner/模板名标记
+                _a_tpls = _load_article_templates(cur["sid"])
+                _a_tname = ""
+                for _t in _a_tpls.get("builtin", []) + _a_tpls.get("templates", []):
+                    if _t.get("id") == cur.get("template_id"):
+                        _a_tname = _t.get("name", "")
+                        break
                 idx[task_id] = {
                     "rel_path": cur.get("rel_path"), "src_name": cur.get("src_name"),
                     "filename": base + ".md", "template_id": cur.get("template_id"),
-                    "model": cur.get("model"), "created_at": cur.get("created_at"),
+                    "template_name": _a_tname, "model": cur.get("model"),
+                    "resource_id": _a_rid, "body_key8": _a_body,
+                    "owner": user_hash(cur["sid"]), "created_at": cur.get("created_at"),
                     "bold_rate": (round(hit * 100 / total) if total else None),
                     "bold_hit": hit, "bold_total": total,
                     "bold_bad": bad[:20],
@@ -3443,8 +3514,11 @@ def article_generate(req: ArticleGenReq, sid: str = Depends(current_identity)):
     rel = (req.rel_path or "").strip().replace("\\", "/").lstrip("/")
     if not rel:
         raise HTTPException(400, "缺少字幕文件路径")
-    # 安全：只允许自己目录下的文件，杜绝跨用户读取；被共享且在有效期内的资源亦放行
-    if not rel.startswith(user_scope(sid) + "/"):
+    # 安全：池化资源（resources/<rid>/）且 sid 拥有该资源 → 放行；被共享且在有效期内的资源亦放行
+    _parts = rel.split("/")
+    if _parts[0] == "resources" and len(_parts) >= 2 and _owner_has_active_ref(sid, _parts[1]):
+        pass
+    elif not rel.startswith(user_scope(sid) + "/"):
         owner, _rid = _shared_subtitle_accepted(sid, rel)
         if not owner:
             raise HTTPException(403, "只能对自己目录下的字幕生成文章")
@@ -3506,7 +3580,9 @@ def article_generate_batch(req: ArticleBatchGenReq, sid: str = Depends(current_i
         row = {"rel_path": r, "label": os.path.basename(r),
                "status": "queued", "note": "", "error": "", "task_id": "", "filename": ""}
         ext = os.path.splitext(r)[1].lower()
-        if not r.startswith(scope):
+        _parts = r.split("/")
+        if not (r.startswith(scope)
+                or (_parts[0] == "resources" and len(_parts) >= 2 and _owner_has_active_ref(sid, _parts[1]))):
             row.update(status="skipped", note="不在你的目录下")
         elif ext not in (".txt", ".srt", ".vtt", ".ass", ".lrc"):
             row.update(status="skipped", note="不是字幕文件")
@@ -3582,34 +3658,50 @@ def article_task(task_id: str, sid: str = Depends(current_identity)):
 @app.get("/api/article/list")
 def article_list(sid: str = Depends(current_identity)):
     """当前用户已生成的文章（磁盘为准，服务重启不丢）。"""
-    d = _article_art_dir(sid)
     with _ARTICLE_TASKS_LOCK:
         mem = {k: dict(v) for k, v in _ARTICLE_TASKS.items() if v.get("sid") == sid}
     idx = _load_article_index(sid)
     items = []
-    try:
-        for fn in os.listdir(d):
-            if not fn.endswith(".md"):
-                continue
-            p = os.path.join(d, fn)
-            try:
-                st = os.stat(p)
-            except Exception:
-                continue
-            tid = fn[:-3]
-            meta = mem.get(tid) or idx.get(tid) or {}
-            items.append({
-                "task_id": tid,
-                "filename": meta.get("filename") or fn,
-                "src_name": meta.get("src_name") or "",
-                "rel_path": meta.get("rel_path") or "",
-                "size": st.st_size,
-                "created_at": st.st_mtime,
-                "bold_rate": meta.get("bold_rate"),
-                "in_memory": tid in mem,
-            })
-    except FileNotFoundError:
-        pass
+    # 内存态（生成中 / 刚完成尚未落 index）按 mem 优先
+    for tid, t in mem.items():
+        _r, _b = _rid_body_from_rel(t.get("rel_path"))
+        if not (_r and _b):
+            continue
+        p = os.path.join(_article_resource_md_dir(_r, _b, sid), tid + ".md")
+        if not os.path.isfile(p):
+            continue
+        st = os.stat(p)
+        items.append({
+            "task_id": tid,
+            "filename": (t.get("filename") or (tid + ".md")),
+            "src_name": t.get("src_name") or "",
+            "rel_path": t.get("rel_path") or "",
+            "size": st.st_size,
+            "created_at": t.get("created_at") or st.st_mtime,
+            "bold_rate": t.get("bold_rate"),
+            "in_memory": True,
+        })
+    # 持久化态（已完成且已写 index，且未出现在 mem）
+    for stem, meta in idx.items():
+        if stem in mem:
+            continue
+        _r, _b = meta.get("resource_id"), meta.get("body_key8")
+        if not (_r and _b):
+            continue
+        p = os.path.join(_article_resource_md_dir(_r, _b, sid), stem + ".md")
+        if not os.path.isfile(p):
+            continue
+        st = os.stat(p)
+        items.append({
+            "task_id": stem,
+            "filename": meta.get("filename") or (stem + ".md"),
+            "src_name": meta.get("src_name") or "",
+            "rel_path": meta.get("rel_path") or "",
+            "size": st.st_size,
+            "created_at": meta.get("created_at") or st.st_mtime,
+            "bold_rate": meta.get("bold_rate"),
+            "in_memory": False,
+        })
     items.sort(key=lambda x: x["created_at"], reverse=True)
     # 显示名去重：同一来源字幕多次生成 → filename 相同，列表里会重名。
     # 仅计算一个 display_name（追加 (2)/(3)…）用于前端展示，不动 filename（下载/删除/重命名均按 task_id）。
@@ -3637,7 +3729,11 @@ def article_file(task_id: str, sid: str = Depends(current_identity)):
     stem = _article_stem(task_id)
     if not stem:
         raise HTTPException(400, "非法任务号")
-    p = os.path.join(_article_art_dir(sid), stem + ".md")
+    meta = dict(_load_article_index(sid).get(stem) or _ARTICLE_TASKS.get(stem) or {})
+    _r, _b = meta.get("resource_id"), meta.get("body_key8")
+    if not (_r and _b):
+        raise HTTPException(404, "文章不存在或缺少资源定位信息")
+    p = os.path.join(_article_resource_md_dir(_r, _b, sid), stem + ".md")
     if not os.path.isfile(p):
         raise HTTPException(404, "文章不存在")
     with _ARTICLE_TASKS_LOCK:
@@ -3651,7 +3747,11 @@ def article_file_delete(task_id: str, sid: str = Depends(current_identity)):
     stem = _article_stem(task_id)
     if not stem:
         raise HTTPException(400, "非法任务号")
-    p = os.path.join(_article_art_dir(sid), stem + ".md")
+    meta = _load_article_index(sid).get(stem)
+    _r, _b = (meta or {}).get("resource_id"), (meta or {}).get("body_key8")
+    if not (_r and _b):
+        raise HTTPException(404, "文章不存在或缺少资源定位信息")
+    p = os.path.join(_article_resource_md_dir(_r, _b, sid), stem + ".md")
     if not os.path.isfile(p):
         raise HTTPException(404, "文章不存在")
     try:
@@ -3680,7 +3780,11 @@ def article_file_rename(task_id: str, req: ArticleRenameReq, sid: str = Depends(
         raise HTTPException(400, "新文件名不能为空")
     # 仅剔除路径分隔与文件系统非法字符，保留中文等；为空则回退 article
     clean = re.sub(r"[/\\:*?\"<>|\x00-\x1f]", "", raw).strip()[:120] or "article"
-    d = _article_art_dir(sid)
+    meta = _load_article_index(sid).get(stem)
+    _r, _b = (meta or {}).get("resource_id"), (meta or {}).get("body_key8")
+    if not (_r and _b):
+        raise HTTPException(404, "文章不存在或缺少资源定位信息")
+    d = _article_resource_md_dir(_r, _b, sid)
     oldp = os.path.join(d, stem + ".md")
     if not os.path.isfile(oldp):
         raise HTTPException(404, "文章不存在")
@@ -3715,7 +3819,10 @@ def article_file_rename(task_id: str, req: ArticleRenameReq, sid: str = Depends(
 def article_check(req: ArticleCheckReq, sid: str = Depends(current_identity)):
     """对（可能被人工编辑过的）文章重新做粗体保真校验。"""
     rel = (req.rel_path or "").strip().replace("\\", "/").lstrip("/")
-    if not rel.startswith(user_scope(sid) + "/"):
+    _parts = rel.split("/")
+    if _parts[0] == "resources" and len(_parts) >= 2 and _owner_has_active_ref(sid, _parts[1]):
+        pass
+    elif not rel.startswith(user_scope(sid) + "/"):
         owner, _rid = _shared_subtitle_accepted(sid, rel)
         if not owner:
             raise HTTPException(403, "只能校验自己目录下的字幕")
