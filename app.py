@@ -418,12 +418,21 @@ def _collections_txn():
     进程内用 RLock 把整段 RMW 串行化（避免 _load_collections 顶层 mtime 快检
     在锁外读到陈旧值后 reload 出「丢失其他线程内存改动」的缓存对象，save 时把改动冲掉）；
     跨进程用文件锁（posix flock；Windows 无 fcntl 则降级）。同一线程嵌套事务靠线程局部
-    深度计数跳过重复文件锁，避免同线程重入死锁。"""
+    深度计数跳过重复文件锁，避免同线程重入死锁。
+
+    关键正确性补丁：进入跨进程临界区（depth==0 且 fcntl 可用）时强制失效本进程 mtime 缓存，
+    使下次 _load_collections 必从磁盘重载——否则多进程下两次写落在同一 mtime 粒度内时，
+    缓存会判「未变」而返回陈旧数据，造成丢更新（flock 已串行 RMW 仍不够）。"""
     depth = getattr(_collections_txn_depth, "v", 0)
     fd = None
     with _collections_lock:
         if depth == 0 and _FCNTL:
             fd = _acquire_file_lock(_COLLECTIONS_LOCKFILE)
+            # 拿到跨进程锁后、读文件前：其他进程可能已改写磁盘文件，mtime 粒度可能让其
+            # 与本地缓存 mtime 相等，故强制置空缓存，强制下次从磁盘重载，杜绝陈旧读。
+            global _collections_cache, _collections_mtime
+            _collections_cache = None
+            _collections_mtime = None
         _collections_txn_depth.v = depth + 1
         try:
             yield
@@ -439,6 +448,10 @@ def _shares_txn():
     with _shares_lock:
         if depth == 0 and _FCNTL:
             fd = _acquire_file_lock(_SHARES_LOCKFILE)
+            # 同 _collections_txn：进入跨进程临界区强制失效本进程 mtime 缓存，防陈旧读丢更新
+            global _shares_cache, _shares_mtime
+            _shares_cache = None
+            _shares_mtime = None
         _shares_txn_depth.v = depth + 1
         try:
             yield

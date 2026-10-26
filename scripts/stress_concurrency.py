@@ -174,6 +174,8 @@ def scenario_c():
 
 
 # ---- 场景 D：多进程（仅 fcntl 可用时）----
+# 关键：每条 entry 用全局唯一 (vid,seq,title) 去重键，避免合集去重把不同条目合并；
+# 终态应为 2N（两进程各 N 条唯一条目）。若跨进程无锁保护，并发 RMW 会丢更新 → < 2N。
 def scenario_d():
     if not rm._FCNTL:
         return None
@@ -181,33 +183,38 @@ def scenario_d():
     rid = "rD" + "0" * 13
     N = 100
     script = os.path.join(TMP, "_d_worker.py")
+    worker_src = (
+        "import sys, os\n"
+        "idx = int(sys.argv[1]) if len(sys.argv) > 1 else 0\n"
+        "N = %d\n"
+        "sys.path.insert(0, %r)\n"
+        "import app as rm\n"
+        "rm.DOWNLOADS=%r\n"
+        "rm.COLLECTIONS_DIR=%r\n"
+        "rm.SHARES_DIR=%r\n"
+        "rm.COLLECTIONS_FILE=%r\n"
+        "rm.RESOURCES_DIR=%r\n"
+        "rm._COLLECTIONS_LOCKFILE=%r\n"
+        "rm._collections_cache=None; rm._collections_mtime=None\n"
+        "rid=%r; base=idx*N\n"
+        "for i in range(N):\n"
+        "    k = base + i\n"
+        "    e = {'rel_path': 'resources/rD/b1/f%%d.mp4' %% k,\n"
+        "         'resource_id': rid, 'title': 't%%d' %% k, 'vid': 'v', 'seq': '%%04d' %% k}\n"
+        "    rm._add_to_collection('uD', e, 'default')\n"
+        % (N, ROOT, TMP, rm.COLLECTIONS_DIR, rm.SHARES_DIR, rm.COLLECTIONS_FILE,
+           rm.RESOURCES_DIR, rm._COLLECTIONS_LOCKFILE, rid)
+    )
     with open(script, "w", encoding="utf-8") as f:
-        f.write(
-            "import sys, os\n"
-            "sys.path.insert(0, %r)\n"
-            "import app as rm\n"
-            "rm.DOWNLOADS=%r\n"
-            "rm.COLLECTIONS_DIR=%r\n"
-            "rm.SHARES_DIR=%r\n"
-            "rm.COLLECTIONS_FILE=%r\n"
-            "rm.RESOURCES_DIR=%r\n"
-            "rm._COLLECTIONS_LOCKFILE=%r\n"
-            "rm._collections_cache=None; rm._collections_mtime=None\n"
-            "rid=%r; n=%d\n"
-            "for i in range(n):\n"
-            "    e={'rel_path':'resources/%s/b1/f%%d.mp4'%%i,'resource_id':rid,'title':'t','vid':'v','seq':'01'}\n"
-            "    rm._add_to_collection('uD', e, 'default')\n"
-            % (ROOT, TMP, rm.COLLECTIONS_DIR, rm.SHARES_DIR, rm.COLLECTIONS_FILE,
-               rm.RESOURCES_DIR, rm._COLLECTIONS_LOCKFILE, rid, N, rid)
-        )
+        f.write(worker_src)
     fresh_state()
-    procs = [subprocess.Popen([sys.executable, script]) for _ in range(2)]
+    procs = [subprocess.Popen([sys.executable, script, str(p)]) for p in range(2)]
     for p in procs:
         assert p.wait() == 0, "worker exit nonzero"
     data = rm._load_collections()
     items = data.get("uD", {}).get("collections", [{}])[0].get("items", [])
-    # 两进程各 N 次，理想 = 2N；有文件锁保护不应丢更新（允许 <= 因 rel_path 唯一故应恰 2N）
-    assert len(items) == 2 * N, "multi-proc items=%d, expected %d" % (len(items), 2 * N)
+    # 两进程各 N 条唯一条目，理想 = 2N；有跨进程文件锁保护不应丢更新
+    assert len(items) == 2 * N, "multi-proc items=%d, expected %d（跨进程锁可能未生效）" % (len(items), 2 * N)
     return 2 * N
 
 
