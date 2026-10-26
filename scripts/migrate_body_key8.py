@@ -28,8 +28,8 @@
 
 用法
 ----
-  python migrate_body_key8.py --downloads-dir /home/fastgpt/media_data           # 仅预览
-  python migrate_body_key8.py --downloads-dir /home/fastgpt/media_data --apply   # 执行
+  python migrate_body_key8.py --downloads-dir <数据目录>           # 仅预览
+  python migrate_body_key8.py --downloads-dir <数据目录> --apply   # 执行
 """
 
 import argparse
@@ -263,7 +263,7 @@ def run(downloads_dir, apply_):
 def main():
     ap = argparse.ArgumentParser(description="RM 资源池 body_key8 内容派生迁移（O3 治本）")
     ap.add_argument("--downloads-dir", required=True,
-                    help="RM 数据根目录（含 resources/ 与 _collections/），如 /home/fastgpt/media_data")
+                    help="RM 数据根目录（含 resources/ 与 _collections/），如 <数据目录>")
     ap.add_argument("--apply", action="store_true",
                     help="真正执行迁移；不加则仅 dry-run 预览")
     args = ap.parse_args()

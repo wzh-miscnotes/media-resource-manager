@@ -9,7 +9,7 @@
   "_auth_mode_note": "身份模式：gateway=只认网关注入的 X-User-Email（RM 不存密码、不引导 admin）；standalone=启用 RM 自带账号体系（admin 引导+登录+用户管理），可完全脱离网关；auto（默认）=网关优先、退回 X-Session-Id。切换无需迁移数据，但独立模式账号须归一化 <名>@local 才能与网关时代的存储键对齐。",
   "auth_mode": "auto",
 
-  "_llm_note": "文章生成（字幕→文章）所需的本地 LLM 推理端点。开源示例仅列字段与占位，部署时请填真实值（base_url 指向本地 LM Studio / Ollama 的 /v1，api_key 与服务端一致）。rm_app 当前线上复用视频下载器的同一 LM Studio 实例（内网 127.0.0.1:1234）。",
+  "_llm_note": "文章生成（字幕→文章）所需的本地 LLM 推理端点。开源示例仅列字段与占位，部署时请填真实值（base_url 指向本地 LM Studio / Ollama 的 /v1，api_key 与服务端一致）。",
   "llm_base_url": "http://127.0.0.1:1234/v1",
   "llm_api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   "llm_model": "qwen/qwen3.6-35b-a3b",
