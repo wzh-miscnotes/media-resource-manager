@@ -43,6 +43,7 @@ import zipfile
 import ipaddress
 
 from collections import OrderedDict
+from contextlib import contextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Header, Request, UploadFile, File, Form
 
@@ -270,7 +271,7 @@ COLLECTIONS_DIR = os.path.join(DOWNLOADS, "_collections")
 
 COLLECTIONS_FILE = os.path.join(COLLECTIONS_DIR, "collections.json")
 
-_collections_lock = threading.Lock()
+_collections_lock = threading.RLock()
 
 _collections_cache = None  # 懒加载
 
@@ -305,8 +306,10 @@ def _load_collections():
 def _save_collections():
     with _collections_lock:
         os.makedirs(COLLECTIONS_DIR, exist_ok=True)
-        with open(COLLECTIONS_FILE, "w", encoding="utf-8") as f:
+        tmp = COLLECTIONS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(_collections_cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, COLLECTIONS_FILE)  # 原子替换，避免写一半崩溃损坏 json
         # 同步 mtime，避免「刚保存就被自己判定为外部改动」而下次无谓重载
         try:
             _collections_mtime = os.path.getmtime(COLLECTIONS_FILE)
@@ -324,7 +327,7 @@ _shares_cache = None
 
 _shares_mtime = None
 
-_shares_lock = threading.Lock()
+_shares_lock = threading.RLock()
 
 BILI_SHARE_DEFAULT_TTL_DAYS = int(os.environ.get("BILI_SHARE_DEFAULT_TTL_DAYS", "30"))
 
@@ -363,8 +366,85 @@ def _load_shares():
 def _save_shares():
     with _shares_lock:
         os.makedirs(SHARES_DIR, exist_ok=True)
-        with open(SHARES_FILE, "w", encoding="utf-8") as f:
+        tmp = SHARES_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(_shares_cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, SHARES_FILE)
+
+
+# ---- 并发安全加固（O7）：跨进程文件锁 + 事务上下文 ----
+# 背景：_collections_lock / _shares_lock 仅进程内串行；若以多 worker / 多进程部署，
+# 各进程各自一份缓存 + 各自一把锁，会出现「读旧快照→覆盖写」的丢更新（_load_collections
+# 的 mtime 失效反而放大该窗口）。这里用文件锁（posix flock；Windows 无 fcntl 则降级为
+# 无操作，依赖单进程共享缓存保证）把「load→改→save」整段 RMW 在跨进程层面也串行化。
+# 同一线程内的嵌套事务（如 ensure_trash_entry 内调 _ensure_trash_collection）靠线程局部
+# 深度计数跳过重复加锁，避免同线程重入死锁。
+try:
+    import fcntl as _fcntl  # type: ignore
+    _FCNTL = True
+except ImportError:
+    _fcntl = None
+    _FCNTL = False
+
+_COLLECTIONS_LOCKFILE = os.path.join(COLLECTIONS_DIR, ".collections.lock")
+_SHARES_LOCKFILE = os.path.join(SHARES_DIR, ".shares.lock")
+
+_collections_txn_depth = threading.local()
+_shares_txn_depth = threading.local()
+
+
+def _acquire_file_lock(path):
+    if not _FCNTL:
+        return None
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = open(path, "w")
+    _fcntl.flock(fd, _fcntl.LOCK_EX)
+    return fd
+
+
+def _release_file_lock(fd):
+    if fd is None:
+        return
+    try:
+        _fcntl.flock(fd, _fcntl.LOCK_UN)
+    finally:
+        fd.close()
+
+
+@contextmanager
+def _collections_txn():
+    """跨进程 + 进程内原子 RMW：持锁期间调用方做 load→改→save 一体。
+
+    进程内用 RLock 把整段 RMW 串行化（避免 _load_collections 顶层 mtime 快检
+    在锁外读到陈旧值后 reload 出「丢失其他线程内存改动」的缓存对象，save 时把改动冲掉）；
+    跨进程用文件锁（posix flock；Windows 无 fcntl 则降级）。同一线程嵌套事务靠线程局部
+    深度计数跳过重复文件锁，避免同线程重入死锁。"""
+    depth = getattr(_collections_txn_depth, "v", 0)
+    fd = None
+    with _collections_lock:
+        if depth == 0 and _FCNTL:
+            fd = _acquire_file_lock(_COLLECTIONS_LOCKFILE)
+        _collections_txn_depth.v = depth + 1
+        try:
+            yield
+        finally:
+            _collections_txn_depth.v = depth
+            _release_file_lock(fd)
+
+
+@contextmanager
+def _shares_txn():
+    depth = getattr(_shares_txn_depth, "v", 0)
+    fd = None
+    with _shares_lock:
+        if depth == 0 and _FCNTL:
+            fd = _acquire_file_lock(_SHARES_LOCKFILE)
+        _shares_txn_depth.v = depth + 1
+        try:
+            yield
+        finally:
+            _shares_txn_depth.v = depth
+            _release_file_lock(fd)
         try:
             _shares_mtime = os.path.getmtime(SHARES_FILE)
         except OSError:
@@ -652,6 +732,8 @@ def _add_to_collection(sid, entry, target_cid="default"):
       3) 否则新生成 uuid4。
     这样共享按 resource_id 授权时，未来衍生物/换目录重下都自动归入同一束。
     """
+    _txn = _collections_txn()
+    _txn.__enter__()
     try:
         cols = _sid_collections(sid)
         target = next((c for c in cols if c["id"] == (target_cid or "default")), None)
@@ -704,6 +786,8 @@ def _add_to_collection(sid, entry, target_cid="default"):
         return None
     except Exception:
         pass
+    finally:
+        _txn.__exit__(None, None, None)
 
 def _title_from_filename(fname: str) -> str:
     """从下载工具产物文件名还原展示标题（去掉 ` [BVxxxxxx].mp4` 后缀）。"""
@@ -713,13 +797,14 @@ def _title_from_filename(fname: str) -> str:
 
 def _ensure_trash_collection():
     """确保 admin@local 下有 __trash__ 回收站系统合集（system:true）。返回其 dict。"""
-    cols = _sid_collections("admin@local")
-    trash = next((c for c in cols if c.get("id") == "__trash__"), None)
-    if trash is None:
-        trash = {"id": "__trash__", "name": "回收站", "items": [], "system": True}
-        cols.append(trash)
-        _save_collections()
-    return trash
+    with _collections_txn():
+        cols = _sid_collections("admin@local")
+        trash = next((c for c in cols if c.get("id") == "__trash__"), None)
+        if trash is None:
+            trash = {"id": "__trash__", "name": "回收站", "items": [], "system": True}
+            cols.append(trash)
+            _save_collections()
+        return trash
 
 def count_active_refs(rid):
     """全局 rid 级活跃引用计数：遍历所有 owner 的所有合集（排除 __trash__），
@@ -764,27 +849,28 @@ def ensure_trash_entry(rid, title, from_sid, rel_path=None, item=None, body_key8
     误显示 OCR 按钮）。"""
     if not rid:
         return
-    trash = _ensure_trash_collection()
-    bk = body_key8 or ""
-    # 去重键 = (resource_id, body_key8)：rid 级条目（bk=""）与 (rid, 旧版本) 条目互不冲突，
-    # 保证「换内容」产生的旧版本回收站条目不会误判为已存在而被跳过。
-    if any(it.get("resource_id") == rid and (it.get("body_key8") or "") == bk for it in trash["items"]):
-        return
-    entry = {
-        "resource_id": rid,
-        "body_key8": bk,
-        "rel_path": rel_path or ("resources/" + rid + "/"),
-        "title": title or rid,
-        "trashed_from": from_sid,
-        "trashed_at": int(time.time()),
-    }
-    if isinstance(item, dict):
-        snap = dict(item)
-        snap["resource_id"] = rid
-        snap["rel_path"] = entry["rel_path"]
-        entry["item_snapshot"] = snap
-    trash["items"].append(entry)
-    _save_collections()
+    with _collections_txn():
+        trash = _ensure_trash_collection()
+        bk = body_key8 or ""
+        # 去重键 = (resource_id, body_key8)：rid 级条目（bk=""）与 (rid, 旧版本) 条目互不冲突，
+        # 保证「换内容」产生的旧版本回收站条目不会误判为已存在而被跳过。
+        if any(it.get("resource_id") == rid and (it.get("body_key8") or "") == bk for it in trash["items"]):
+            return
+        entry = {
+            "resource_id": rid,
+            "body_key8": bk,
+            "rel_path": rel_path or ("resources/" + rid + "/"),
+            "title": title or rid,
+            "trashed_from": from_sid,
+            "trashed_at": int(time.time()),
+        }
+        if isinstance(item, dict):
+            snap = dict(item)
+            snap["resource_id"] = rid
+            snap["rel_path"] = entry["rel_path"]
+            entry["item_snapshot"] = snap
+        trash["items"].append(entry)
+        _save_collections()
 
 def remove_trash_entry(rid, body_key8=None):
     """引用复活（新增引用 / restore）时从回收站移除该条目（幂等）。
@@ -793,20 +879,21 @@ def remove_trash_entry(rid, body_key8=None):
     传入 body_key8 时精确移除 (rid, body_key8) 条目，避免误删同 rid 的其它版本。"""
     if not rid:
         return
-    data = _load_collections()
-    cols = data.get("admin@local", {}).get("collections", [])
-    trash = next((c for c in cols if c.get("id") == "__trash__"), None)
-    if not trash:
-        return
-    before = len(trash["items"])
-    if body_key8 is None:
-        trash["items"] = [it for it in trash["items"] if it.get("resource_id") != rid]
-    else:
-        bk = body_key8 or ""
-        trash["items"] = [it for it in trash["items"]
-                          if not (it.get("resource_id") == rid and (it.get("body_key8") or "") == bk)]
-    if len(trash["items"]) != before:
-        _save_collections()
+    with _collections_txn():
+        data = _load_collections()
+        cols = data.get("admin@local", {}).get("collections", [])
+        trash = next((c for c in cols if c.get("id") == "__trash__"), None)
+        if not trash:
+            return
+        before = len(trash["items"])
+        if body_key8 is None:
+            trash["items"] = [it for it in trash["items"] if it.get("resource_id") != rid]
+        else:
+            bk = body_key8 or ""
+            trash["items"] = [it for it in trash["items"]
+                              if not (it.get("resource_id") == rid and (it.get("body_key8") or "") == bk)]
+        if len(trash["items"]) != before:
+            _save_collections()
 
 def _first_bili_sub(extras):
     """从附加文件列表中挑出官方字幕 TXT 的相对路径。"""
@@ -1609,17 +1696,18 @@ def _lock_owner_shares(owner, rid):
     """
     if not owner or not rid:
         return False
-    data = _load_shares()
-    changed = False
-    for rec in data.get("tokens", {}).values():
-        if rec.get("owner") == owner and (rec.get("resource_id") or "") == rid:
-            if not rec.get("revoked") or not rec.get("locked"):
-                rec["revoked"] = True
-                rec["locked"] = True
-                changed = True
-    if changed:
-        _save_shares()
-    return changed
+    with _shares_txn():
+        data = _load_shares()
+        changed = False
+        for rec in data.get("tokens", {}).values():
+            if rec.get("owner") == owner and (rec.get("resource_id") or "") == rid:
+                if not rec.get("revoked") or not rec.get("locked"):
+                    rec["revoked"] = True
+                    rec["locked"] = True
+                    changed = True
+        if changed:
+            _save_shares()
+        return changed
 
 def _unlock_owner_shares(owner, rid):
     """资源恢复到 owner 正常合集后：解除该 owner 对应令牌的锁定。
@@ -1628,15 +1716,16 @@ def _unlock_owner_shares(owner, rid):
     """
     if not owner or not rid:
         return False
-    data = _load_shares()
-    changed = False
-    for rec in data.get("tokens", {}).values():
-        if rec.get("owner") == owner and (rec.get("resource_id") or "") == rid and rec.get("locked"):
-            rec["locked"] = False
-            changed = True
-    if changed:
-        _save_shares()
-    return changed
+    with _shares_txn():
+        data = _load_shares()
+        changed = False
+        for rec in data.get("tokens", {}).values():
+            if rec.get("owner") == owner and (rec.get("resource_id") or "") == rid and rec.get("locked"):
+                rec["locked"] = False
+                changed = True
+        if changed:
+            _save_shares()
+        return changed
 
 class TrashPurgeReq(BaseModel):
     rid: str = ""
@@ -1700,33 +1789,34 @@ def trash_restore(req: TrashRestoreReq, sid: str = Depends(current_identity)):
     bk = (req.body_key8 or "").strip()
     if not rid:
         raise HTTPException(400, "rid 必填")
-    data = _load_collections()
-    cols = data.get("admin@local", {}).get("collections", [])
-    trash = next((c for c in cols if c.get("id") == "__trash__"), None)
-    # 精确匹配：指定 body_key8 还原该旧版本，否则按 rid 级条目还原。
-    entry = next((it for it in (trash["items"] if trash else [])
-                  if it.get("resource_id") == rid and (it.get("body_key8") or "") == bk), None)
-    if not entry:
-        raise HTTPException(404, "回收站中无此资源")
-    tgt = (req.target_sid or "").strip() or entry.get("trashed_from") or "admin@local"
-    tcols = _sid_collections(tgt)
-    default = next((c for c in tcols if c.get("id") == "default"), None)
-    if not default:
-        raise HTTPException(400, "目标用户无默认合集")
-    if not any(it.get("resource_id") == rid for it in default["items"]):
-        snap = entry.get("item_snapshot")
-        # 有完整快照 → 逐字还原（cover/subtitle/vid/subtitle_source 等全字段），
-        # 否则退回最小字段重建（兼容旧版无快照的回收站条目，仅保证可播放）
-        new_item = dict(snap) if isinstance(snap, dict) else {}
-        new_item["rel_path"] = new_item.get("rel_path") or entry.get("rel_path") or ("resources/" + rid + "/")
-        new_item["title"] = new_item.get("title") or entry.get("title") or rid
-        new_item["resource_id"] = rid
-        new_item["restored_at"] = int(time.time())
-        default["items"].append(new_item)
-    if trash:
-        trash["items"] = [it for it in trash["items"]
-                          if not (it.get("resource_id") == rid and (it.get("body_key8") or "") == bk)]
-    _save_collections()
+    with _collections_txn():
+        data = _load_collections()
+        cols = data.get("admin@local", {}).get("collections", [])
+        trash = next((c for c in cols if c.get("id") == "__trash__"), None)
+        # 精确匹配：指定 body_key8 还原该旧版本，否则按 rid 级条目还原。
+        entry = next((it for it in (trash["items"] if trash else [])
+                      if it.get("resource_id") == rid and (it.get("body_key8") or "") == bk), None)
+        if not entry:
+            raise HTTPException(404, "回收站中无此资源")
+        tgt = (req.target_sid or "").strip() or entry.get("trashed_from") or "admin@local"
+        tcols = _sid_collections(tgt)
+        default = next((c for c in tcols if c.get("id") == "default"), None)
+        if not default:
+            raise HTTPException(400, "目标用户无默认合集")
+        if not any(it.get("resource_id") == rid for it in default["items"]):
+            snap = entry.get("item_snapshot")
+            # 有完整快照 → 逐字还原（cover/subtitle/vid/subtitle_source 等全字段），
+            # 否则退回最小字段重建（兼容旧版无快照的回收站条目，仅保证可播放）
+            new_item = dict(snap) if isinstance(snap, dict) else {}
+            new_item["rel_path"] = new_item.get("rel_path") or entry.get("rel_path") or ("resources/" + rid + "/")
+            new_item["title"] = new_item.get("title") or entry.get("title") or rid
+            new_item["resource_id"] = rid
+            new_item["restored_at"] = int(time.time())
+            default["items"].append(new_item)
+        if trash:
+            trash["items"] = [it for it in trash["items"]
+                              if not (it.get("resource_id") == rid and (it.get("body_key8") or "") == bk)]
+        _save_collections()
     # 资源恢复到 owner 正常合集后，解除该 owner 对应令牌的锁定（令牌仍 revoked，需手动重新开启）
     _unlock_owner_shares(tgt, rid)
     return {"ok": True, "rid": rid, "target_sid": tgt}
@@ -2142,75 +2232,76 @@ def delete_files(req: DeleteFilesReq, sid: str = Depends(current_identity)):
     """批量删除视频文件（及其绑定的字幕文件），并从该用户所有合集中移除引用。
     items: [{"rel_path":..., "subtitle":...}]，字幕随视频整体删除。
     删除后若任务目录已无媒体文件，会整目录清理（含封面、孤立字幕、目录骨架）。"""
-    cols = _sid_collections(sid)
-    deleted, missing, trashed = [], [], []
-    touched_dirs = []
-    own_prefix = "users/" + user_hash(sid) + "/"
-    for ent in (req.items or []):
-        rel = (ent.get("rel_path") if isinstance(ent, dict) else str(ent)).strip()
-        sub = (ent.get("subtitle", "") if isinstance(ent, dict) else "").strip()
-        if not rel:
-            continue
-        rel_norm = rel.replace("\\", "/").strip()
-        is_resource = rel_norm.startswith("resources/")
-        # 资源池条目的 rid 与展示标题（用于回收站记录）
-        rid = None
-        title = rel_norm
-        matched_item = None            # 命中的合集条目（完整快照，供回收站 restore 还原全字段）
-        if is_resource:
-            parts = rel_norm.split("/")
-            rid = parts[1] if len(parts) > 1 else None
-            for c in cols:
-                for it in c["items"]:
-                    if (it.get("rel_path") or "").replace("\\", "/") == rel_norm:
-                        title = it.get("title") or title
-                        rid = rid or it.get("resource_id")
-                        matched_item = it
-                        break
-        if is_resource:
-            pass  # 资源池物理文件为共享存储，不删；仅移除引用，引用归零后入回收站
-        elif not rel_norm.startswith(own_prefix):
-            # 安全：仅允许删除本人 users/{hash}/ 下的文件，杜绝跨用户删他人资源
-            missing.append(rel_norm)
-            continue
-        else:
-            vpath = os.path.join(DOWNLOADS, rel_norm)
-            if os.path.isfile(vpath):
-                touched_dirs.append(os.path.dirname(vpath))
-                try:
-                    os.remove(vpath); deleted.append(rel_norm)
-                except Exception:
-                    pass
-            else:
+    with _collections_txn():  # O7 并发安全：整段「移除引用→引用归零入回收站→锁定共享」原子化
+        cols = _sid_collections(sid)
+        deleted, missing, trashed = [], [], []
+        touched_dirs = []
+        own_prefix = "users/" + user_hash(sid) + "/"
+        for ent in (req.items or []):
+            rel = (ent.get("rel_path") if isinstance(ent, dict) else str(ent)).strip()
+            sub = (ent.get("subtitle", "") if isinstance(ent, dict) else "").strip()
+            if not rel:
+                continue
+            rel_norm = rel.replace("\\", "/").strip()
+            is_resource = rel_norm.startswith("resources/")
+            # 资源池条目的 rid 与展示标题（用于回收站记录）
+            rid = None
+            title = rel_norm
+            matched_item = None            # 命中的合集条目（完整快照，供回收站 restore 还原全字段）
+            if is_resource:
+                parts = rel_norm.split("/")
+                rid = parts[1] if len(parts) > 1 else None
+                for c in cols:
+                    for it in c["items"]:
+                        if (it.get("rel_path") or "").replace("\\", "/") == rel_norm:
+                            title = it.get("title") or title
+                            rid = rid or it.get("resource_id")
+                            matched_item = it
+                            break
+            if is_resource:
+                pass  # 资源池物理文件为共享存储，不删；仅移除引用，引用归零后入回收站
+            elif not rel_norm.startswith(own_prefix):
+                # 安全：仅允许删除本人 users/{hash}/ 下的文件，杜绝跨用户删他人资源
                 missing.append(rel_norm)
-        if sub and rel_norm.startswith(own_prefix):
-            spath = os.path.join(DOWNLOADS, sub)
-            if os.path.isfile(spath):
-                touched_dirs.append(os.path.dirname(spath))
-                try:
-                    os.remove(spath); deleted.append(sub)
-                except Exception:
-                    pass
-        for c in cols:
-            c["items"] = [it for it in c["items"] if (it.get("rel_path") or "").replace("\\", "/") != rel_norm]
-        # 资源池引用归零 → 入回收站（物理保留，由 admin 决定是否清理）
-        if is_resource and rid:
-            if count_active_refs(rid) == 0:
-                ensure_trash_entry(rid, title, sid, rel_norm, item=matched_item)
-                trashed.append(rid)
-            # per-user 共享令牌加锁：删除者若自身已无 rid 活跃引用 → 其签发的共享令牌失效且不可重置
-            # （与资源是否停在 admin 回收站无关；判定只看 owner 本人正常合集是否还持有 rid）
-            still_has = any(
-                c.get("id") != "__trash__" and any(
-                    (it.get("resource_id") or "") == rid for it in c.get("items", [])
+                continue
+            else:
+                vpath = os.path.join(DOWNLOADS, rel_norm)
+                if os.path.isfile(vpath):
+                    touched_dirs.append(os.path.dirname(vpath))
+                    try:
+                        os.remove(vpath); deleted.append(rel_norm)
+                    except Exception:
+                        pass
+                else:
+                    missing.append(rel_norm)
+            if sub and rel_norm.startswith(own_prefix):
+                spath = os.path.join(DOWNLOADS, sub)
+                if os.path.isfile(spath):
+                    touched_dirs.append(os.path.dirname(spath))
+                    try:
+                        os.remove(spath); deleted.append(sub)
+                    except Exception:
+                        pass
+            for c in cols:
+                c["items"] = [it for it in c["items"] if (it.get("rel_path") or "").replace("\\", "/") != rel_norm]
+            # 资源池引用归零 → 入回收站（物理保留，由 admin 决定是否清理）
+            if is_resource and rid:
+                if count_active_refs(rid) == 0:
+                    ensure_trash_entry(rid, title, sid, rel_norm, item=matched_item)
+                    trashed.append(rid)
+                # per-user 共享令牌加锁：删除者若自身已无 rid 活跃引用 → 其签发的共享令牌失效且不可重置
+                # （与资源是否停在 admin 回收站无关；判定只看 owner 本人正常合集是否还持有 rid）
+                still_has = any(
+                    c.get("id") != "__trash__" and any(
+                        (it.get("resource_id") or "") == rid for it in c.get("items", [])
+                    )
+                    for c in cols
                 )
-                for c in cols
-            )
-            if not still_has:
-                _lock_owner_shares(sid, rid)
-    _save_collections()
-    pruned = _prune_orphan_dirs(set(touched_dirs), sid)
-    return {"ok": True, "deleted": deleted, "missing": missing, "pruned_dirs": pruned, "trashed_resources": trashed}
+                if not still_has:
+                    _lock_owner_shares(sid, rid)
+        _save_collections()
+        pruned = _prune_orphan_dirs(set(touched_dirs), sid)
+        return {"ok": True, "deleted": deleted, "missing": missing, "pruned_dirs": pruned, "trashed_resources": trashed}
 
 @app.post("/api/upload")
 async def upload_files(
