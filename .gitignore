@@ -36,3 +36,6 @@ _articles/
 logs/
 venv/
 .venv/
+
+# ===== 公众号草稿产物（本地草稿，不入库）=====
+docs/*-公众号彩色版.html
