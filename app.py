@@ -1834,6 +1834,17 @@ def trash_restore(req: TrashRestoreReq, sid: str = Depends(current_identity)):
     _unlock_owner_shares(tgt, rid)
     return {"ok": True, "rid": rid, "target_sid": tgt}
 
+@app.get("/share/{token}", include_in_schema=False)
+def share_page(token: str):
+    """只读分享页入口：返回单页前端，由前端按 location.pathname 进入 share-mode。
+
+    必须作为真实路由存在：run_server.py 以 StaticFiles(html=True) 挂在 "/"，
+    对 /share/<token> 这类不存在于磁盘的路径会直接 404，前端根本没机会执行。
+    app.py 内的路由先于该 mount 注册，故优先命中这里。
+    """
+    return FileResponse(os.path.join(BASE, "index.html"), media_type="text/html")
+
+
 @app.get("/api/share/{token}")
 def share_info(token: str, sid: str = Depends(current_identity)):
     """分享页拉取资源元数据（标题/文件清单/是否过期）。需登录。"""
