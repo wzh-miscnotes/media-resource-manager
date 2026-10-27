@@ -32,7 +32,8 @@ media-resource-manager/
 ├── config.example.json        # 配置样例（复制为 config.json 后填写）
 ├── requirements.txt           # Python 依赖
 ├── docs/
-│   ├── 资源池与回收站设计.md    # 资源池 / 回收站 / 共享 设计文档
+│   ├── 资源池与回收站设计-对外精简版.md  # 架构设计（当前权威版：去重/回收站/共享失效）
+│   ├── 资源池与回收站设计.md    # v1 历史基准（已停止更新）
 │   └── 字幕OCR方案.md          # 硬字幕 OCR 接入方案
 └── downloads/                 # 运行时数据目录（gitignore，含 resources/、_collections/、.thumbnail_cache/ 等）
 ```
@@ -127,7 +128,8 @@ docker run -d --name rm_app --network host \
 
 ## 文档
 
-- `docs/资源池与回收站设计.md`：资源池布局、回收站、per-user 共享的设计细节。
+- `docs/资源池与回收站设计-对外精简版.md`：架构设计（当前权威版）——两层去重 key、入池路由、双层回收站、共享失效模型。
+- `docs/资源池与回收站设计.md`：v1 历史基准，保留供追溯演进。
 - `docs/字幕OCR方案.md`：硬字幕 OCR（olmOCR）接入方案。
 
 ## 使用与合规
