@@ -68,16 +68,21 @@ def _ingest_group(proc_dir, stem, owner_default):
     meta = _load_meta(os.path.join(proc_dir, stem + ".meta.json"))
     owner = (meta.get("owner") or "").strip() or owner_default
     title = meta.get("title") or ""
-    vid = meta.get("vid") or ""
+    # 兼容旧投递端只写 bvid 的 meta；vid 用于 _entry_dedup_key，绝不能是文件名。
+    meta_vid = (meta.get("vid") or meta.get("bvid") or "").strip()
     seq = meta.get("seq") or ""
     target_cid = meta.get("target_cid") or "default"
+    # 两端 cid 不共享，投递端额外带合集名，RM 按名称匹配 / 自动建同名合集。
+    target_name = (meta.get("collection_name") or "").strip()
 
     # 视频（必需）
     vids = [f for f in files if f.lower().endswith(MEDIA_EXT)]
     if not vids:
         raise RuntimeError("group has no media file")
-    vid = max(vids, key=lambda f: os.path.getsize(os.path.join(proc_dir, f)))
-    vid_abs = os.path.join(proc_dir, vid)
+    # 注意：这里必须叫 vid_file。原实现复用 `vid` 变量把「视频 ID」覆盖成了文件名，
+    # 导致 entry["vid"] 存成 "xxx.mp4"，去重键退化（2026-11-04 修正）。
+    vid_file = max(vids, key=lambda f: os.path.getsize(os.path.join(proc_dir, f)))
+    vid_abs = os.path.join(proc_dir, vid_file)
 
     # 字幕：主字幕走 match_subtitle（仅认 _字幕.txt，保持契约）；
     # 同时收集同 stem 的其它字幕（srt/vtt/ass/xml 等）一并作为 extras 入池。
@@ -104,13 +109,14 @@ def _ingest_group(proc_dir, stem, owner_default):
 
     # extras 传绝对路径：_move_staged_to_pool 对绝对路径直接采用，无需依赖 DOWNLOADS 拼接
     extras = [p for p in (sub_abs_list + [cover_abs]) if p and os.path.isfile(p)]
-    title_final = title or _title_from_filename(vid)
+    title_final = title or _title_from_filename(vid_file)
 
     # R1/R2/R3（2026-10-21）：_ingest_into_pool 返回 4 元组（多 replaced_rel_path），
     # 此处必须解包 4 个，否则 ValueError: too many values to unpack（曾致 watcher 全量失败）。
     rid_out, dedup, _rel, _replaced = _ingest_into_pool(
         owner, rid, body_key8, vid_abs, extras, title_final,
-        target_cid=target_cid, vid=vid, seq=seq, content_sha256=vid_hash,
+        target_cid=target_cid, vid=meta_vid, seq=seq, content_sha256=vid_hash,
+        target_name=target_name,
     )
     return rid_out, dedup, owner
 

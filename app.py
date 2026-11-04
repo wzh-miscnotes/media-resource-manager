@@ -729,7 +729,7 @@ def _move_staged_to_pool(main_abs, extras_rel, rid, body_key8):
             new_extras.append(os.path.relpath(ne, DOWNLOADS))
     return new_main, new_extras
 
-def _add_to_collection(sid, entry, target_cid="default"):
+def _add_to_collection(sid, entry, target_cid="default", target_name=""):
     """把一条视频加入当前用户的指定合集。
 
     去重分两级：
@@ -750,10 +750,23 @@ def _add_to_collection(sid, entry, target_cid="default"):
     try:
         cols = _sid_collections(sid)
         target = next((c for c in cols if c["id"] == (target_cid or "default")), None)
+        # 投递端与 RM 的 collections.json 互相独立、cid 各自生成，投递端带来的 cid
+        # 在本侧通常不存在。退一步按合集名匹配；仍找不到且给了名字，就自动建同名合集
+        # （方案 A，2026-11-04）。避免「静默回退默认合集」让用户以为没同步。
+        if not target and target_name:
+            target = next((c for c in cols
+                           if (c.get("name") or "").strip() == target_name), None)
+        if not target and target_name and target_name != "默认合集":
+            new_cid = "c" + uuid.uuid4().hex[:10]
+            target = {"id": new_cid, "name": target_name, "items": []}
+            cols.append(target)
+            _save_collections()
+            print(f"[collection] 自动建同名合集 owner={sid} name={target_name} cid={new_cid}",
+                  flush=True)
         if not target:
             target = next((c for c in cols if c["id"] == "default"), None)
         if not target:
-            return
+            raise RuntimeError(f"合集登记失败：owner={sid} 无可用合集")
         rel = entry.get("rel_path")
 
         # ---- resource_id 稳定化（资源池集束主键）----
@@ -797,8 +810,13 @@ def _add_to_collection(sid, entry, target_cid="default"):
         _save_collections()
         remove_trash_entry(res_id, entry.get("body_key8"))  # 新建引用：引用复活清回收站（精确）
         return None
-    except Exception:
-        pass
+    except Exception as e:
+        # 不得静默吞掉：watcher 靠异常判定成败，吞了会「文件已入池并清理 inbox，
+        # 合集里却没有条目」——无日志、无重试，数据像凭空消失（2026-11-04 排查）。
+        print(f"[collection] ERROR 登记失败 owner={sid} "
+              f"rid={entry.get('resource_id')} cid={target_cid} name={target_name}: {e}",
+              flush=True)
+        raise
     finally:
         _txn.__exit__(None, None, None)
 
@@ -4063,7 +4081,8 @@ def _recycle_unreferenced_body_dirs(rid, keep_body_key8):
 
 
 def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target_cid="default",
-                      vid="", seq="", subtitle_source="", cover="", content_sha256=""):
+                      vid="", seq="", subtitle_source="", cover="", content_sha256="",
+                      target_name=""):
     """统一入池 + 登记合集引用（ingest / upload / import-dir / watcher 共用，见 RM-实施指引 §2）。
 
     去重（O3 治本，2026-10-20）：body_key8 已改为「文件内容哈希派生」，配合此处的内容级去重，
@@ -4137,7 +4156,7 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
     # meta.json 衍生物（O3 解耦）：同主干 .json 入池后记录其相对路径，供前端/下游读取资源元数据
     meta_candidate = next((e for e in _extras if e.lower().endswith(".json")), "")
     entry["meta"] = meta_candidate
-    replaced_rel = _add_to_collection(owner, entry, target_cid)
+    replaced_rel = _add_to_collection(owner, entry, target_cid, target_name)
     # R2（换内容回收，2026-10-21）：登记同 rid 下无引用的旧 body_key8 子目录到回收站（物理保留）。
     _recycle_unreferenced_body_dirs(rid, body_key8)
     return rid, dedup_hit, rel_main, replaced_rel
