@@ -373,6 +373,8 @@
   /* 卡片上的「🔤 识别内嵌字幕 / 🔄 重新识别字幕」按钮：与「✍️ 文章」上下错开，
      纵向位置由行内 top 决定（无字幕→42px；已有字幕，两者并存→76px） */
   .lib-card .ocr-btn:hover{background:#7c5cf6}
+  /* OCR 任务进行中：按钮置灰不可点（单用户全局只允许一个识别任务） */
+  .lib-card .ocr-btn:disabled{opacity:.62;cursor:not-allowed;background:#9aa0a6}
   #articleMask{z-index:70}
   #articleListMask{z-index:75}
   .art-body{display:flex;gap:0;min-height:0;flex:1;align-items:stretch}
@@ -965,6 +967,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // 提前加载一次合集列表，供合集下拉使用
   // standalone 且未登录时由 initAuth 弹登录框、暂不加载（避免 403 空库）
   initAuth();
+  // 刷新/重开页面后恢复未完成的 OCR 进度（用 localStorage 里的 task_id）
+  _ocrRestoreActive();
 
 });
 
@@ -1125,9 +1129,10 @@ async function renderLibGrid(){
     // 纵向位置：与「✍️ 文章」错开（有字幕时两者并存 → 76px）
     // 注：artBtn / arts / artBlock 已在上方（isShared 之前）统一定义，此处两个分支共用，不再重复声明
     const ocrBtnTop = it.subtitle ? 76 : 42;
+    // data-rid 供「识别中」占用态使用：有任务在跑时据此高亮对应卡片、禁用其它卡片按钮
     const ocrBtn = (it.shared || isOfficial) ? "" : (it.subtitle
-      ? `<button class="share-btn ocr-btn" style="top:${ocrBtnTop}px" title="重新识别内嵌硬字幕（会覆盖现有字幕文件；可选择识别密度）" onclick="event.stopPropagation();rerunOcrSubtitle(${i})">🔄 重新识别</button>`
-      : `<button class="share-btn ocr-btn" style="top:${ocrBtnTop}px" title="识别视频内嵌的硬字幕（需视频本身带字幕条；可选择识别密度）" onclick="event.stopPropagation();runOcrSubtitle(${i})">🔤 识别字幕</button>`);
+      ? `<button class="share-btn ocr-btn" data-rid="${esc(it.resource_id||"")}" style="top:${ocrBtnTop}px" title="重新识别内嵌硬字幕（会覆盖现有字幕文件；可选择识别密度）" onclick="event.stopPropagation();rerunOcrSubtitle(${i})">🔄 重新识别</button>`
+      : `<button class="share-btn ocr-btn" data-rid="${esc(it.resource_id||"")}" style="top:${ocrBtnTop}px" title="识别视频内嵌的硬字幕（需视频本身带字幕条；可选择识别密度）" onclick="event.stopPropagation();runOcrSubtitle(${i})">🔤 识别字幕</button>`);
     return `<div class="lib-card${picked}" onclick="openPlayerTab(${i})">
       <input type="checkbox" class="pick" ${checked}
         data-rel="${esc(it.rel_path)}" data-sub="${esc(it.subtitle||"")}"
@@ -1155,6 +1160,7 @@ async function renderLibGrid(){
   });
   updateBatchBar();
   refreshPendingBadge();
+  _ocrApplyBusyUI();   // 重新渲染卡片后恢复「识别中」占用态（任务进行中切换合集也保持一致）
 }
 
 /* ---- 「被共享」合集辅助 ---- */
@@ -1386,7 +1392,92 @@ async function trashPurge(rid){
 }
 
 /* ---- 硬字幕 OCR（内嵌字幕识别）：媒体库手动触发 ---- */
-function ocrToast(msg, kind){
+/* ---- OCR 活跃任务：服务端为准 + localStorage 辅助 + 卡片占用态 ----
+   设计要点：
+   · 「是否有人正在识别」以服务端 /api/ocr/active 为准（内存态，刷新不丢）；
+     localStorage 只是辅助记住上次 task_id，供服务端已终结时展示结果。
+   · 单用户全局只允许一个 running 的 OCR 任务（后端已改成 owner 级去重），
+     因此占用态是「按用户」的：某用户有任务在跑时，其所有卡片 OCR 按钮禁用，
+     仅正在识别的那张高亮显示进度；别的用户不受影响。 */
+const OCR_ACTIVE_KEY = "ocr_active_task";
+let _ocrActive = null;   // {tid, rid, ts} 当前用户活跃任务（内存态，随页面刷新重建）
+
+function _ocrSaveActive(tid, rid){
+  _ocrActive = {tid, rid, ts:Date.now()};
+  try{ localStorage.setItem(OCR_ACTIVE_KEY, JSON.stringify(_ocrActive)); }catch(e){}
+  _ocrApplyBusyUI();
+}
+function _ocrClearActive(){
+  _ocrActive = null;
+  try{ localStorage.removeItem(OCR_ACTIVE_KEY); }catch(e){}
+  _ocrApplyBusyUI();
+}
+function _ocrLoadActive(){
+  try{
+    const raw = localStorage.getItem(OCR_ACTIVE_KEY);
+    if(!raw) return null;
+    const o = JSON.parse(raw);
+    if(!o || !o.tid) return null;
+    if(Date.now() - (o.ts||0) > 24*3600*1000){ _ocrClearActive(); return null; } // 超过 24h 视为过期
+    return o;
+  }catch(e){ _ocrClearActive(); return null; }
+}
+/* 把「识别中」占用态写到卡片按钮上：有任务时禁用所有 OCR 按钮，正在识别的那张显示 ⏳ */
+function _ocrApplyBusyUI(){
+  const busyRid = _ocrActive && _ocrActive.rid;
+  document.querySelectorAll(".ocr-btn[data-rid]").forEach(btn=>{
+    const isTarget = busyRid && btn.getAttribute("data-rid") === busyRid;
+    btn.disabled = !!_ocrActive;
+    if(isTarget){
+      btn.textContent = "⏳ 识别中…";
+      btn.title = "该视频的字幕识别正在进行中，进度见顶部提示";
+    }
+  });
+}
+/* 刷新/重开页面后恢复：先问服务端有没有 running 任务，再据本地记录补展示结果。
+   关键：任何分支都给出明确提示，绝不静默清空让用户以为没反应。 */
+async function _ocrRestoreActive(){
+  let act = null;
+  try{
+    const r = await fetch("/api/ocr/active");
+    if(r.ok) act = await r.json();
+  }catch(e){ /* 网络异常：退回本地记录继续尝试 */ }
+
+  if(act && act.active){
+    // 服务端有任务在跑：以它为准重建占用态并继续轮询（不受 localStorage 是否为准影响）
+    _ocrSaveActive(act.task_id, act.resource_id);
+    ocrToast("已恢复未完成的 OCR 任务，继续显示进度…（" + (act.resource_id||"") + "）", "warn");
+    const t = await _ocrPoll(act.task_id);
+    if(t) await _ocrAfter(t);
+    return;
+  }
+
+  // 服务端无任务：检查本地残留记录，给出「已完成/失败/已丢失」的明确回执
+  const a = _ocrLoadActive();
+  if(!a) return;
+  try{
+    const r = await fetch("/api/task/" + a.tid);
+    if(!r.ok){
+      ocrToast("上次发起的 OCR 任务已随服务重启丢失（服务端无记录），请重新点击「识别字幕」。", "err");
+      _ocrClearActive(); return;
+    }
+    const t = await r.json();
+    if(t.status==="running"){
+      // 竞态：查询瞬间服务端刚启动任务——按运行中恢复
+      _ocrSaveActive(a.tid, a.rid);
+      const tt = await _ocrPoll(a.tid);
+      if(tt) await _ocrAfter(tt);
+    }else{
+      _ocrClearActive();
+      await _ocrAfter(t);  // 终结态：展示上次结果
+    }
+  }catch(e){
+    // 网络异常不清本地记录，下次刷新再试；给出一次性提示
+    ocrToast("恢复 OCR 任务状态时网络异常，请稍后刷新重试。", "warn");
+  }
+}
+
+function ocrToast(msg, kind, sticky){
   let el = document.getElementById("ocrToast");
   if(!el){
     el = document.createElement("div");
@@ -1399,33 +1490,93 @@ function ocrToast(msg, kind){
   el.textContent = msg;
   el.style.display = "block";
   clearTimeout(el._t);
-  el._t = setTimeout(()=>{ el.style.display="none"; }, 6000);
+  // sticky=true 时常驻（轮询期间用），否则 6 秒后自动消失
+  if(!sticky) el._t = setTimeout(()=>{ el.style.display="none"; }, 6000);
+}
+
+/* OCR 专用进度提示：用真实 CSS 条替代 [█░] 文本字符。
+   字符 █/░ 在不同字体下宽度不一致，会导致填充比例视觉错位（52% 看着像 40%）。 */
+function ocrProgressToast(pct, detail){
+  let el = document.getElementById("ocrToast");
+  if(!el){
+    el = document.createElement("div");
+    el.id = "ocrToast";
+    el.style.cssText = "position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:9999;padding:10px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.18);max-width:82vw;min-width:280px;line-height:1.5";
+    document.body.appendChild(el);
+  }
+  el.style.background = "#333"; el.style.color = "#fff";
+  const p = Math.max(0, Math.min(100, Number(pct)||0));
+  el.innerHTML =
+      '<div style="margin-bottom:6px">OCR 进行中… ' + p + '%</div>'
+    + '<div style="height:8px;background:rgba(255,255,255,.22);border-radius:4px;overflow:hidden">'
+    +   '<div style="height:100%;width:' + p + '%;background:#8b6cf0;transition:width .2s linear"></div>'
+    + '</div>'
+    + '<div class="ocr-toast-detail" style="margin-top:6px;font-size:12px;opacity:.85;white-space:pre-wrap"></div>';
+  // 详情来自后端日志，用 textContent 写入，避免 HTML 注入
+  el.querySelector(".ocr-toast-detail").textContent = detail || "";
+  el.style.display = "block";
+  clearTimeout(el._t);   // 轮询期间常驻
 }
 
 async function _ocrPoll(taskId){
+  if(!taskId) return null;  // 提交失败（无 task_id）时不轮询，避免覆盖错误提示
   return new Promise(resolve=>{
+    let miss = 0;          // 连续查询失败次数（404 / 网络异常）
+    let settled = false;
+    const finish = (val)=>{
+      if(settled) return;  // 防止同一任务重复 resolve
+      settled = true;
+      clearInterval(timer);
+      // 终态清理持久化的 task_id：正常完成/失败，或确认任务已丢失
+      if(val && (val.status==="done" || val.status==="error")) _ocrClearActive();
+      resolve(val);
+    };
     const timer = setInterval(async ()=>{
       try{
         const r = await fetch("/api/task/" + taskId);
-        if(!r.ok) return;
-        const t = await r.json();
-        const last = (t.log||[]).slice(-1)[0] || "";
-        ocrToast("OCR 进行中…\n" + last);
-        if(t.status==="done" || t.status==="error"){
-          clearInterval(timer);
-          resolve(t);
+        if(!r.ok){
+          miss++;
+          if(miss >= 6){   // 连续 6 次（约 12 秒）查不到：明确报错并停止，不再静默刷 404
+            ocrToast("❌ 无法查询任务状态（任务可能已随服务重启丢失），请刷新媒体库页面查看结果", "err");
+            _ocrClearActive();
+            finish(null);
+            return;
+          }
+          ocrToast("任务已提交，正在查询进度…（" + miss + "/6）", "warn", true);
+          return;
         }
-      }catch(e){}
+        miss = 0;
+        const t = await r.json();
+        const logs = t.log||[];
+        const last = t.message || logs.slice(-1)[0] || "";
+        const pct = (typeof t.progress==="number") ? Math.round(t.progress*100) : 0;
+        ocrProgressToast(pct, last);
+        if(t.status==="done" || t.status==="error") finish(t);
+      }catch(e){
+        miss++;
+        if(miss >= 6){
+          ocrToast("❌ 进度查询连续失败，请刷新媒体库页面查看结果", "err");
+          finish(null);
+          return;
+        }
+        ocrToast("进度查询异常，重试中…（" + miss + "/6）", "warn", true);
+      }
     }, 2000);
   });
 }
 
 async function _ocrAfter(t){
+  if(t.status==="error"){
+    ocrToast("❌ OCR 失败：" + (t.result||"未知错误"), "err");
+    return;
+  }
   if(t.result==="ok"){
     ocrToast("✅ 硬字幕识别完成，已生成字幕文件", "ok");
     await loadLibrary();   // 刷新卡片：显示「有字幕」+ 文章入口
-  } else {
+  } else if(t.result==="no_subtitle"){
     ocrToast("⚠️ 未识别到硬字幕（可能确实无内嵌字幕）", "warn");
+  } else {
+    ocrToast("⚠️ 上次 OCR 未生成字幕（" + (t.result||"无结果") + "）", "warn");
   }
 }
 
@@ -1461,6 +1612,11 @@ async function rerunOcrSubtitle(i){
 }
 
 function openOcrGear(rid, isRerun){
+  // 单用户全局并发护栏：已有任务在跑（本视频或其它视频）时，不再弹档位框让用户重复提交
+  if(_ocrActive){
+    ocrToast("你已有一个字幕识别任务正在进行中（" + (_ocrActive.rid||"") + "），请等它完成后再识别其它视频。", "warn");
+    return;
+  }
   let ov = document.getElementById("ocrGear");
   if(!ov){
     ov = document.createElement("div");
@@ -1493,6 +1649,7 @@ function openOcrGear(rid, isRerun){
 async function startOcr(rid, fps){
   const gearName = fps===0.5 ? "快速 0.5x" : (fps===2 ? "精细 2x" : "标准 1x");
   ocrToast(`正在前置检验（${gearName}）：检测视频是否含内嵌字幕…`);
+  // doRun 返回 {tid, reused, busyRid}；reused=后端发现该用户已有任务在跑（可能是别的视频）
   const doRun = async (force) => {
     const r = await fetch("/api/ocr-subtitle", {method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({ resource_id: rid, force, fps })});
@@ -1501,10 +1658,24 @@ async function startOcr(rid, fps){
       try{ const e = await r.json(); msg = e.detail || msg; }catch(e){}
       ocrToast("❌ " + msg, "err"); return null;
     }
-    return (await r.json()).task_id;
+    const d = await r.json();
+    if(!d.task_id) return null;
+    // busyRid 优先用服务端回带的占用 rid：reused 时它可能≠本视频（单用户其它任务）
+    const busyRid = d.busy_rid || rid;
+    _ocrSaveActive(d.task_id, busyRid);   // 持久化 + 卡片占用态
+    return {tid: d.task_id, reused: !!d.reused, busyRid};
   };
-  let t = await _ocrPoll(await doRun(false));
+
+  let d = await doRun(false);
+  if(!d) return;
+  // 已有任务在跑（尤其别的视频）：明确告知用户占用来自谁，直接跟那个任务的进度，
+  // 不再走「no_subtitle 强制重试」分支（那是针对本视频新任务才成立的判断）。
+  if(d.reused && d.busyRid && d.busyRid !== rid){
+    ocrToast("你已有一个字幕识别任务正在进行（视频 " + d.busyRid + "）。\n单用户同时只能跑一个，正在显示该任务进度…", "warn", true);
+  }
+  let t = await _ocrPoll(d.tid);
   if(!t) return;
+  if(d.reused) { await _ocrAfter(t); return; }   // 复用任务：不触发本视频的强制重试
   if(t.status==="error"){
     ocrToast("❌ OCR 失败：" + (t.result||"未知错误"), "err");
     return;
@@ -1513,8 +1684,8 @@ async function startOcr(rid, fps){
     // 前置检验未命中：提示并询问是否强制尝试
     const go = confirm("未检测到内嵌字幕。\n\n可能该视频本身没有字幕条，或字幕区域/画质不适合识别。\n\n仍要强制尝试完整识别吗？");
     if(go){
-      const t2 = await _ocrPoll(await doRun(true));
-      if(t2) await _ocrAfter(t2);
+      const d2 = await doRun(true);
+      if(d2){ const t2 = await _ocrPoll(d2.tid); if(t2) await _ocrAfter(t2); }
     }
     return;
   }
@@ -3411,6 +3582,7 @@ async function doLogin(){
     document.getElementById("loginPw").value = "";
     _auth.identity = j.identity; _auth.is_admin = j.is_admin; _auth.login_required = false;
     renderAuthBar();
+    _ocrClearActive();   // 换账号后清掉上一账号的 OCR 占用态，避免按钮被误禁用
     loadLibrary();
   }catch(e){ err.textContent = "登录请求失败：" + e; }
 }
@@ -3419,6 +3591,7 @@ async function doLogout(){
   await fetch("/api/logout", { method:"POST" }).catch(()=>{});
   _auth.identity = null; _auth.is_admin = false; _auth.login_required = true;
   renderAuthBar();
+  _ocrClearActive();   // 退出后不再显示上一账号的 OCR 占用态
   document.getElementById("loginMask").classList.remove("hidden");
 }
 

@@ -12,6 +12,8 @@ import os
 
 import re
 
+import difflib
+
 import time
 
 import uuid
@@ -632,6 +634,21 @@ async def _standalone_auth_gate(request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def _no_cache_html(request, call_next):
+    """给 HTML 页面加 no-store，避免 index.html 被浏览器/反代缓存成旧版。
+
+    背景：前端改版（尤其 OCR 占用态、刷新恢复）后，用户强刷前一直看到旧界面——
+    StaticFiles 默认只发 last-modified/etag，浏览器协商缓存命中旧 HTML，
+    表现为「新逻辑没生效」。仅对 text/html 禁止缓存，封面/字幕等静态资源照常缓存。
+    """
+    resp = await call_next(request)
+    if (resp.headers.get("content-type") or "").startswith("text/html"):
+        resp.headers["Cache-Control"] = "no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
 def _entry_dedup_key(entry):
     """合集条目去重键：(vid, 序号, 标题)。
 
@@ -644,6 +661,16 @@ def _entry_dedup_key(entry):
     """
     rp = (entry.get("rel_path") or "").replace("\\", "/")
     base = rp.rsplit("/", 1)[-1]
+
+    # 公众号文章（2026-11-19）：dedup_key 用 resource_id（生产者按 url 派生的 r<sha256> 稳定），
+    # 不用 title——作者改标题很常见，用 title 会让同一 rid 出现两条条目、旧版不回收。
+    # 加 "article:" 前缀隔离，避免与视频 title 巧合碰撞；保持三元组结构兼容 803 处的解包。
+    _st = (entry.get("source_type") or "").strip()
+    _mt = (entry.get("media_type") or "").strip()
+    if _st == "wechat_article" or _mt == "article":
+        _rid = (entry.get("resource_id") or "").strip()
+        if _rid:
+            return ("", "", "article:" + _rid)
 
     m = re.match(r"^(\d{2,4})[\s._\-]", base)
     seq = m.group(1) if m else ""
@@ -749,20 +776,29 @@ def _add_to_collection(sid, entry, target_cid="default", target_name=""):
     _txn.__enter__()
     try:
         cols = _sid_collections(sid)
-        target = next((c for c in cols if c["id"] == (target_cid or "default")), None)
-        # 投递端与 RM 的 collections.json 互相独立、cid 各自生成，投递端带来的 cid
-        # 在本侧通常不存在。退一步按合集名匹配；仍找不到且给了名字，就自动建同名合集
-        # （方案 A，2026-11-04）。避免「静默回退默认合集」让用户以为没同步。
-        if not target and target_name:
+        # 2026-11-16 修复（合集分组退化回归 ②）：用户显式指定的合集名（投递端 meta 的
+        # collection_name）必须优先于 target_cid。此前先按 cid 找，而下载端 Step C 瘦身后
+        # 已无本地 cid，meta 的 target_cid 恒为 "default" → 第一行直接命中「默认合集」，
+        # 下面按名匹配 / 自动建同名合集两个分支永远短路，合集名被静默忽略（实测 131 集
+        # 全部落进默认合集、目标合集 items=0）。现在 name 非空且非「默认合集」时先按名
+        # 匹配、找不到则自动建；name 为空才回落到原本的 cid 语义（ingest/upload/import-dir
+        # 等调用方都不传 name，行为完全不变）。
+        _name = (target_name or "").strip()
+        target = None
+        if _name and _name != "默认合集":
             target = next((c for c in cols
-                           if (c.get("name") or "").strip() == target_name), None)
-        if not target and target_name and target_name != "默认合集":
-            new_cid = "c" + uuid.uuid4().hex[:10]
-            target = {"id": new_cid, "name": target_name, "items": []}
-            cols.append(target)
-            _save_collections()
-            print(f"[collection] 自动建同名合集 owner={sid} name={target_name} cid={new_cid}",
-                  flush=True)
+                           if (c.get("name") or "").strip() == _name), None)
+            if not target:
+                # 两端 collections.json 互相独立、cid 各自生成：按名匹配不到就自动建同名
+                # 合集（方案 A，2026-11-04），避免「静默回退默认合集」让用户以为没同步。
+                new_cid = "c" + uuid.uuid4().hex[:10]
+                target = {"id": new_cid, "name": _name, "items": []}
+                cols.append(target)
+                _save_collections()
+                print(f"[collection] 自动建同名合集 owner={sid} name={_name} cid={new_cid}",
+                      flush=True)
+        if not target:
+            target = next((c for c in cols if c["id"] == (target_cid or "default")), None)
         if not target:
             target = next((c for c in cols if c["id"] == "default"), None)
         if not target:
@@ -1197,6 +1233,10 @@ def _resource_paths(owner, rid):
             if it.get("resource_id") == rid:
                 if it.get("rel_path"):
                     paths.add(it["rel_path"].replace("\\", "/"))
+                # P0-5（2026-11-19）：共享文章时放行正文图片。必须与 rel_path 平级放在
+                # resource_id==rid 块内——文章无字幕，塞进 subtitle 分支等于没改。
+                for im in (it.get("images") or []):
+                    paths.add(str(im).replace("\\", "/"))
                 if it.get("subtitle"):
                     sub = it["subtitle"].replace("\\", "/")
                     paths.add(sub)
@@ -1287,7 +1327,10 @@ def serve_thumbnail_cache(name: str):
     path = os.path.abspath(path)
     if not path.startswith(os.path.abspath(THUMBNAIL_CACHE_DIR)) or not os.path.isfile(path):
         raise HTTPException(404, "封面缓存不存在")
-    return FileResponse(path, media_type="image/webp")  # 多数平台封面为 webp
+    _ext = os.path.splitext(name)[1].lower()
+    _mime = {".webp": "image/webp", ".png": "image/png", ".jpg": "image/jpeg",
+             ".jpeg": "image/jpeg", ".gif": "image/gif"}.get(_ext, "image/webp")
+    return FileResponse(path, media_type=_mime)  # 按实际扩展名推断，不再硬编码 webp
 
 class CollectionReq(BaseModel):
     name: str = ""
@@ -1570,6 +1613,12 @@ def _shared_with_me_collection(identity):
             "vid": src.get("vid", ""),
             "resource_id": rid,
             "stale": not exists,
+            # 文章字段透传（2026-11-19）：接收方「被共享」里要认出文章卡片、渲染 iframe、
+            # 并为正文相对图片补 ?share= token，前端 P1 依赖这几个字段。src 缺失时安全降级为空。
+            "source_type": src.get("source_type", ""),
+            "media_type": src.get("media_type", ""),
+            "url": src.get("url", ""),
+            "images": list(src.get("images") or []),
             # 共享扩展字段
             "shared": True,
             "share_token": token,
@@ -2811,7 +2860,8 @@ def _clean_ocr_text(txt: str) -> str:
         t = re.sub(r"^\s*\w+\s*\n", "", t, count=1)
     return t.strip()
 
-def _detect_embedded_subtitle(video_path: str, log_cb, model: str = None, sample_n: int = 24):
+def _detect_embedded_subtitle(video_path: str, log_cb, model: str = None, sample_n: int = 24,
+                              progress_cb=None):
     """前置检验：均匀抽 sample_n 帧，裁底部字幕带，问模型『该区域是否有字幕文字』。
     返回 (detected, total, status)。detected>=1 即视为存在内嵌字幕。
     一次 ffmpeg 抽完所有样帧（不再逐帧 -ss），顺序（workers=1）识别，
@@ -2882,13 +2932,17 @@ def _detect_embedded_subtitle(video_path: str, log_cb, model: str = None, sample
                 detected += 1
         except Exception:
             pass
+        # 预检占 0-10%，每张回写进度
+        if progress_cb:
+            progress_cb(max(1, int(10 * idx / max(len(frames), 1))),
+                        f"前置检验 {idx}/{len(frames)} 帧")
         if idx % 8 == 0 or idx == len(frames):
             log_cb(f"[OCR预检] 检测进度 {idx}/{len(frames)}")
     shutil.rmtree(tmp, ignore_errors=True)
     return detected, len(frames), "ok"
 
 def _generate_ocr_subtitle(video_path: str, out_dir: str, log_cb, title_hint: str = "",
-                           model: str = None, fps: float = 1.0):
+                           model: str = None, fps: float = 1.0, progress_cb=None):
     """硬字幕 OCR（治本版）：
 
     1) 一次 ffmpeg 抽帧：fps 可调（0.5/1/2 档位），裁底部 28% 字幕带并缩放，
@@ -2969,6 +3023,7 @@ def _generate_ocr_subtitle(video_path: str, out_dir: str, log_cb, title_hint: st
         return None, None, "no_frames"
     total = len(got)                              # 以实际抽到为准（视频末尾可能不足）
     n_sheets = (total + PER_SHEET - 1) // PER_SHEET
+    if progress_cb: progress_cb(10, f"抽帧完成 {total} 帧，正在拼图…")
 
     sheet_dir = tempfile.mkdtemp(prefix="ocr_sheet_")
     # ⚠ 用「1 列 × 6 行」竖排而非横排 2×3：
@@ -2992,10 +3047,11 @@ def _generate_ocr_subtitle(video_path: str, out_dir: str, log_cb, title_hint: st
         log_cb("[OCR] ⚠ 拼图失败（ffmpeg 无输出）")
         return None, None, "no_frames"
     log_cb(f"[OCR] 已生成 {len(sheets)} 张拼图，开始顺序识别...")
+    if progress_cb: progress_cb(20, f"已生成 {len(sheets)} 张拼图，开始识别…")
 
     sys_p = (
         "你是一个专业的硬字幕 OCR 引擎。下方图像是由 6 张连续视频帧拼成的拼图"
-        "（2 列 × 3 行），每格右下角有红色帧号（如 0、1、2…），那是『帧编号标记』，不是字幕内容。\n"
+        "（1 列 × 6 行，自上而下竖排），每格右下角有红色帧号（如 0、1、2…），那是『帧编号标记』，不是字幕内容。\n"
         "请逐格提取『字幕条』文本（通常是底部居中的对白字幕，忽略画面正文/海报/水印/UI）。\n"
         "输出严格遵循每行一格的格式：  帧号 字幕文本\n"
         "例如：\n"
@@ -3102,20 +3158,43 @@ def _generate_ocr_subtitle(video_path: str, out_dir: str, log_cb, title_hint: st
             repaired += len(missing)
         frame_text.update(got)
         done = si + 1
+        # 每张都回写进度（20% 起，占 75%），前端进度条持续可见；log 仍每 10 张打一次避免刷屏
+        if progress_cb:
+            _pct = 20 + int(75 * done / max(len(sheets), 1))
+            progress_cb(_pct, f"识别 {done}/{len(sheets)} 拼图（{min(done*PER_SHEET, total)}/{total} 帧）")
         if done % 10 == 0 or done == len(sheets):
             log_cb(f"[OCR] 识别进度 {done}/{len(sheets)} 拼图（{min(done*PER_SHEET, total)}/{total} 帧）"
                    + (f"；行序映射 {by_order} 张" if by_order else "")
                    + (f"；缺格补齐累计 {repaired} 帧" if repaired else ""))
 
-    # 4) 聚类：按全局帧号连续、文本相同合并；空/无字幕为间隙
+    # 4) 聚类：按全局帧号连续、文本相同或高度相似合并；空/无字幕为间隙
+    #    治本（2026-11-19）：olmOCR 对同一句字幕会在标点、空格、轻微措辞上抖动
+    #    （如「，」/「。」、「要求10%」/「要求 10% 」），旧逻辑只去空白后精确相等，
+    #    导致同一句被拆成多段、字幕面板出现重复行。这里改为去标点归一化 + 相似度判定。
     NO_SUB = "无字幕"
-    norm = lambda s: re.sub(r"\s+", "", s or "")
+    _PUNCT_RE = re.compile(r"[\s，。、；：！？“”‘’（）《》〈〉·—…,.;:!?\"'()\[\]{}<>/\-]")
+    def _norm_sub(s):
+        """字幕比较归一化：取第一行（硬字幕通常单行；拼图 OCR 偶发把滚动中的
+        下一句串到第二行属噪声），去标点/空白后比较。"""
+        lines = (s or "").splitlines()
+        first = lines[0] if lines else ""
+        return _PUNCT_RE.sub("", first)
+    def _same_sub(a, b):
+        na, nb = _norm_sub(a), _norm_sub(b)
+        if not na or not nb:
+            return False
+        if na == nb:
+            return True
+        # 长度差过大不判同句，避免把一个短句吞进长句
+        if abs(len(na) - len(nb)) > max(len(na), len(nb)) * 0.15:
+            return False
+        return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.90
     segs = []
     cur_text = None
     cur_start = None
     for g in range(total):
         txt = frame_text.get(g, "")
-        if norm(txt) == norm(NO_SUB) or not norm(txt):
+        if _norm_sub(txt) == _norm_sub(NO_SUB) or not _norm_sub(txt):
             if cur_text is not None:
                 segs.append((cur_start, g / eff_fps, cur_text))
                 cur_text = None
@@ -3124,8 +3203,8 @@ def _generate_ocr_subtitle(video_path: str, out_dir: str, log_cb, title_hint: st
         if cur_text is None:
             cur_start = t0
             cur_text = txt
-        elif norm(cur_text) == norm(txt):
-            pass  # 延续当前字幕
+        elif _same_sub(cur_text, txt):
+            pass  # 同一句的标点/空格/轻微措辞差异 → 延续当前段
         else:
             segs.append((cur_start, t0, cur_text))
             cur_start = t0
@@ -3197,16 +3276,61 @@ def ocr_subtitle(req: OcrSubtitleReq, sid: str = Depends(current_identity)):
         raise HTTPException(409, "该视频已有官方字幕，不支持用 OCR 覆盖（如需替换为 OCR 字幕，请先删除原字幕再重试）")
     if not LLM_BASE_URL:
         raise HTTPException(500, "服务端未配置模型地址（llm_base_url）")
-    task_id = uuid.uuid4().hex[:16]
+    now = time.time()
     with tasks_lock:
+        # 防重复（单用户全局）：同一 owner 只要有**任一** running 的 OCR 任务，
+        # 就不能再发起任何视频的识别（本地模型单并发，多任务只会互相抢算力且进度难追踪）。
+        # 命中时复用其 task_id（幂等），并回带该任务占用的 rid，供前端提示用户在识别哪个视频。
+        # 僵尸兜底：超过 2 小时仍 running 的视为失效，允许新提交。
+        for _tid, _t in tasks.items():
+            if (_t.get("type") == "ocr" and _t.get("owner") == sid
+                    and _t.get("status") == "running"):
+                if now - _t.get("created_at", 0) < 7200:
+                    return {"task_id": _tid, "reused": True,
+                            "busy_rid": _t.get("resource_id")}
+        task_id = uuid.uuid4().hex[:16]
         tasks[task_id] = {
             "id": task_id, "status": "running", "progress": 0.0, "log": [],
             "file": None, "filename": None, "extras": [], "size": 0, "cmd": "",
             "type": "ocr", "owner": sid, "resource_id": rid,
-            "result": "", "message": "",
+            "result": "", "message": "", "created_at": now,
         }
     threading.Thread(target=_run_ocr_subtitle, args=(task_id, sid, rid, req.force, req.fps), daemon=True).start()
     return {"task_id": task_id}
+
+@app.get("/api/ocr/active")
+def ocr_active(sid: str = Depends(current_identity)):
+    """查询当前用户是否有正在运行的 OCR 任务（服务端为准，刷新后恢复用）。
+
+    前端刷新/重开页面后调用：若返回 running 任务，则据此高亮对应卡片按钮并轮询进度；
+    这样即便 localStorage 被清或多标签之间状态不同步，也能以服务端内存态为准恢复。
+    超过 2 小时的僵尸任务不返回。"""
+    now = time.time()
+    with tasks_lock:
+        for _tid, _t in tasks.items():
+            if (_t.get("type") == "ocr" and _t.get("owner") == sid
+                    and _t.get("status") == "running"
+                    and now - _t.get("created_at", 0) < 7200):
+                return {"active": True, "task_id": _tid,
+                        "resource_id": _t.get("resource_id"),
+                        "progress": _t.get("progress", 0.0),
+                        "message": _t.get("message", "")}
+    return {"active": False}
+
+@app.get("/api/task/{task_id}")
+def get_task(task_id: str, sid: str = Depends(current_identity)):
+    """通用后台任务状态查询（OCR 等），前端轮询此端点展示进度。
+
+    数据来自内存 tasks 字典；服务重启后任务丢失则返回 404。
+    仅任务 owner 可查询，避免跨账号窥探。"""
+    with tasks_lock:
+        t = tasks.get(task_id)
+        t = dict(t) if t else None
+    if not t:
+        raise HTTPException(404, "任务不存在或已随服务重启丢失")
+    if t.get("owner") and t.get("owner") != sid:
+        raise HTTPException(403, "无权访问该任务")
+    return t
 
 def _run_ocr_subtitle(task_id, sid, rid, force, fps=1.0):
     """后台执行：前置检验 → 全量 OCR → 回填条目 subtitle 字段。"""
@@ -3221,6 +3345,15 @@ def _run_ocr_subtitle(task_id, sid, rid, force, fps=1.0):
             t = tasks.get(task_id)
             if t:
                 t.update(kw)
+
+    def setprog(pct, msg=""):
+        """OCR 阶段进度回写：入参 0-100，task.progress 统一存 0-1（前端按 *100 显示）。"""
+        with tasks_lock:
+            t = tasks.get(task_id)
+            if t:
+                t["progress"] = round(pct / 100.0, 4)
+                if msg:
+                    t["message"] = msg
 
     try:
         # 重新取最新条目（避免拿到过期引用）
@@ -3245,7 +3378,8 @@ def _run_ocr_subtitle(task_id, sid, rid, force, fps=1.0):
         stem = os.path.splitext(os.path.basename(vpath))[0]
 
         # 前置检验：是否真有内嵌字幕
-        detected, total, st = _detect_embedded_subtitle(vpath, log, model=OCR_MODEL)
+        detected, total, st = _detect_embedded_subtitle(vpath, log, model=OCR_MODEL,
+                                                        progress_cb=setprog)
         log(f"[OCR预检] 在 {total} 帧中检测到 {detected} 帧含字幕")
         if detected == 0 and not force:
             setf(status="done", progress=1.0, result="no_subtitle",
@@ -3254,7 +3388,8 @@ def _run_ocr_subtitle(task_id, sid, rid, force, fps=1.0):
 
         # 全量 OCR（档位 fps：0.5/1/2）
         srt, txt, ost = _generate_ocr_subtitle(
-            vpath, out_dir, log, title_hint=stem, model=OCR_MODEL, fps=fps)
+            vpath, out_dir, log, title_hint=stem, model=OCR_MODEL, fps=fps,
+            progress_cb=setprog)
         if ost != "ok" or not txt:
             setf(status="done", progress=1.0, result=ost or "empty",
                  message="未识别到硬字幕（可能确实无内嵌字幕）")
@@ -4008,10 +4143,16 @@ def _find_identical_media(pool_dir, content_sha256):
     return None
 
 
-def _pick_main_media_in_dir(d):
-    """返回目录内体积最大的主媒体文件绝对路径（无则 None）。用于回收站还原定位主文件。"""
+def _pick_main_media_in_dir(d, prefer_html=False):
+    """返回目录内主文件绝对路径（无则 None）。用于回收站还原定位主文件。
+    prefer_html=True（公众号文章场景）：优先返回 .html 正文文件，避免退化成目录路径导致 serve 404（P0-4）。
+    默认保持原行为：挑体积最大的媒体文件（视频/音频），对视频零副作用。"""
     if not os.path.isdir(d):
         return None
+    if prefer_html:
+        for fn in os.listdir(d):
+            if fn.lower().endswith(".html") and os.path.isfile(os.path.join(d, fn)):
+                return os.path.join(d, fn)
     best, best_sz = None, -1
     for fn in os.listdir(d):
         if fn.lower().endswith(MEDIA_EXT) and os.path.isfile(os.path.join(d, fn)):
@@ -4054,7 +4195,9 @@ def _recycle_unreferenced_body_dirs(rid, keep_body_key8):
         if sub == keep_body_key8 or sub in referenced:
             continue
         # 无引用 -> 旧版本，登记回收站（物理保留，绝不直接删）
-        main = _pick_main_media_in_dir(sub_dir)
+        # P0-4：prefer_html=True 让文章正文 .html 当主文件；视频目录无 .html，行为不变。
+        main = _pick_main_media_in_dir(sub_dir, prefer_html=True)
+        is_article = bool(main and main.lower().endswith(".html"))
         rel = (os.path.relpath(main, DOWNLOADS).replace(os.sep, "/")
                if main else ("resources/" + rid + "/" + sub + "/"))
         # 构建可恢复快照：扫描子目录里的封面/字幕，使 restore 后能还原可播放条目
@@ -4076,13 +4219,19 @@ def _recycle_unreferenced_body_dirs(rid, keep_body_key8):
             "subtitle_source": "official" if sub_file else "",
             "added_at": time.time(),
         }
+        # 文章旧版：补全 source_type/images，使 restore 后仍是「文章」卡片且正文图片可见（P0-2/P0-4 配套）
+        if is_article:
+            snap["source_type"] = "wechat_article"
+            snap["media_type"] = "article"
+            snap["images"] = [os.path.relpath(os.path.join(sub_dir, f), DOWNLOADS).replace(os.sep, "/")
+                              for f in sorted(os.listdir(sub_dir)) if f.lower().endswith(IMG_EXTS)]
         ensure_trash_entry(rid, snap["title"], "ingest(R2)", rel_path=rel,
                            item=snap, body_key8=sub)
 
 
 def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target_cid="default",
                       vid="", seq="", subtitle_source="", cover="", content_sha256="",
-                      target_name=""):
+                      target_name="", source_type="video", url=""):
     """统一入池 + 登记合集引用（ingest / upload / import-dir / watcher 共用，见 RM-实施指引 §2）。
 
     去重（O3 治本，2026-10-20）：body_key8 已改为「文件内容哈希派生」，配合此处的内容级去重，
@@ -4119,6 +4268,8 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
         "resource_id": rid,
         "body_key8": body_key8,
         "media_type": media_type_of(main_abs),  # 前瞻埋点（2026-10-22）：video/audio/text/image
+        "source_type": source_type,  # 资源大类（默认 video）；公众号图文为 wechat_article
+        "url": url,                  # 公众号文章永久直链（其它资源为空）
         "vid": vid,
         "seq": seq,
         "duration": None,
@@ -4141,6 +4292,12 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
     # txt 优先（match_subtitle 契约）；无 txt 时退化用其它字幕格式，保证有字幕可显。
     entry["subtitle"] = _txt or _other_sub
     entry["subtitle_srt"] = _srt  # 可选增强，记录池内相对路径
+    # 公众号图文（2026-11-19）：P0-2 收集正文图片到 images[]；P0-3 覆盖 media_type。
+    # _extras 已是「池内相对路径」，直接筛 IMG_EXTS 即可，无需二次扫目录。
+    # 封面也在其中，前端首图可直接取 entry["cover"]。
+    if source_type == "wechat_article":
+        entry["images"] = [e for e in _extras if e.lower().endswith(IMG_EXTS)]
+        entry["media_type"] = "article"   # .html 的 media_type_of 为 other，article 场景显式覆盖
     # subtitle_source：显式传入优先；否则有字幕即记为 official，无则空。
     entry["subtitle_source"] = subtitle_source or ("official" if entry["subtitle"] else "")
     # 封面：显式传入优先；否则把池内封面复制进缩略图缓存、以缓存名回填
@@ -4532,6 +4689,8 @@ class IngestReq(BaseModel):
     cover: str = ""
     extras: list[str] = []        # R1（2026-10-21）：任意额外文件（srt/其它字幕/封面等），向后兼容
     target_cid: str = "default"
+    source_type: str = "video"    # 资源大类（中性默认）；公众号图文生产者传 "wechat_article"
+    url: str = ""                 # 文章永久直链（公众号归档场景）
 
 
 @app.post("/api/ingest")
@@ -4554,7 +4713,7 @@ def ingest(req: IngestReq, sid: str = Depends(current_identity)):
                if p and os.path.isfile(p)]
     rid, dedup_hit, rel, replaced = _ingest_into_pool(
         owner, req.rid, body_key8, req.staged_path, extras, req.title, req.target_cid,
-        content_sha256=_h,
+        content_sha256=_h, source_type=req.source_type, url=req.url,
     )
     # R3（2026-10-21）：返回被替换掉的旧版本 rel_path（换内容场景），无替换则为空串。
     return {"ok": True, "rid": rid, "resource_id": rid, "dedup_hit": dedup_hit,

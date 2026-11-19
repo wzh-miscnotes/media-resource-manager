@@ -15,6 +15,7 @@ config.json
 # ===== 本地验证脚本与截图（不入库）=====
 _ui_*.cjs
 _verify_*.py
+_move_*.py
 _probe_contact/
 *.png
 
@@ -22,6 +23,7 @@ _probe_contact/
 _内部需求-*
 docs/拆分后资源池系统优化与待办.md
 docs/拆分后资源池与回收站设计.md
+docs/资源库投递与存储目录结论.md
 
 # ===== RM 运行时数据（资源池 / 用户合集 / 文章簇，禁止入库）=====
 resources/
