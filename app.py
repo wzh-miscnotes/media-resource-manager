@@ -874,9 +874,27 @@ def _ensure_trash_collection():
             _save_collections()
         return trash
 
+def _rid_of_item(it):
+    """合集条目 → rid。优先 resource_id，缺失时退回 rel_path（resources/<rid>/...）。
+
+    为什么需要兜底：姊妹接口 add_collection_item 只按 CollectionItemReq 建条目，而该模型
+    没有 resource_id 字段——采集器/脚本走这条路添加的条目只有 rel_path。若引用计数只认
+    resource_id，这类条目会被当成「无引用」，导致删掉一处引用就误判归零（别人还在引用
+    却进了回收站），并误锁本人分享令牌。"""
+    rid = (it.get("resource_id") or "").strip()
+    if rid:
+        return rid
+    rel = (it.get("rel_path") or "").replace("\\", "/")
+    if rel.startswith("resources/"):
+        parts = rel.split("/")
+        if len(parts) > 1 and parts[1]:
+            return parts[1]
+    return ""
+
+
 def count_active_refs(rid):
     """全局 rid 级活跃引用计数：遍历所有 owner 的所有合集（排除 __trash__），
-    统计 resource_id==rid 的条目。"""
+    统计该资源被引用的条目数。rid 归一走 _rid_of_item（兼容只有 rel_path 的条目）。"""
     if not rid:
         return 0
     data = _load_collections()
@@ -886,7 +904,7 @@ def count_active_refs(rid):
             if c.get("id") == "__trash__":
                 continue
             for it in c.get("items", []):
-                if (it.get("resource_id") or "") == rid:
+                if _rid_of_item(it) == rid:
                     n += 1
     return n
 
@@ -2266,15 +2284,50 @@ def add_collection_item(cid: str, req: CollectionItemReq, sid: str = Depends(cur
 
 @app.delete("/api/collection/{cid}/items")
 def remove_collection_item(cid: str, req: CollectionItemReq, sid: str = Depends(current_identity)):
-    cols = _sid_collections(sid)
-    c = next((x for x in cols if x["id"] == cid), None)
-    if not c:
-        raise HTTPException(404, "合集不存在")
-    rel = (req.rel_path or "").strip()
-    before = len(c["items"])
-    c["items"] = [it for it in c["items"] if it.get("rel_path") != rel]
-    _save_collections()
-    return {"ok": True, "removed": before - len(c["items"])}
+    """合集条目级删除（公开 API，供采集器/脚本/集成调用；前端不调，UI 走 /api/files/delete）。
+
+    ⚠️ 「引用归零」语义必须与 delete_files 一致：摘掉引用后，若该 rid 已无任何活跃引用
+    → 入 admin 回收站（带完整快照，可恢复）；若本人已无活跃引用 → 锁定本人分享令牌。
+    此前这里只做列表过滤，导致同一个用户动作两条路径两种结果：从 UI 删是「进回收站可恢复」，
+    从接口删是「凭空消失、资源留在磁盘无人管、分享链接继续有效」。
+    """
+    with _collections_txn():   # 与 delete_files 一致：摘引用 → 归零判定 → 入回收站/锁令牌 原子化
+        cols = _sid_collections(sid)
+        c = next((x for x in cols if x["id"] == cid), None)
+        if not c:
+            raise HTTPException(404, "合集不存在")
+        rel_norm = (req.rel_path or "").replace("\\", "/").strip()
+        before = len(c["items"])
+        hit = next((it for it in c["items"]
+                    if (it.get("rel_path") or "").replace("\\", "/") == rel_norm), None)
+        c["items"] = [it for it in c["items"]
+                      if (it.get("rel_path") or "").replace("\\", "/") != rel_norm]
+        removed = before - len(c["items"])
+
+        # 资源池条目：rid 以路径为准（物理目录才是真相），条目字段仅作兜底
+        if hit and rel_norm.startswith("resources/"):
+            _parts = rel_norm.split("/")
+            rid = (_parts[1] if len(_parts) > 1 else "") or _rid_of_item(hit)
+            if rid:
+                # 判定一：全局已无活跃引用 → 入回收站。必须传 item=hit 完整快照，
+                # 否则 restore 时封面/字幕/日期/类型全丢（见 ensure_trash_entry docstring）。
+                if count_active_refs(rid) == 0:
+                    ensure_trash_entry(rid, hit.get("title") or rel_norm, sid, rel_norm, item=hit)
+                # 判定二：本人是否还有活跃引用 → 锁令牌。**独立于判定一**：
+                # 资源被其他 owner 也引用时（全局计数 > 0）本人令牌照样要锁，
+                # 否则删完自己的引用后分享链接仍然有效。
+                still_has = any(
+                    c2.get("id") != "__trash__" and any(
+                        _rid_of_item(it2) == rid for it2 in c2.get("items", [])
+                    )
+                    for c2 in cols
+                )
+                if not still_has:
+                    _lock_owner_shares(sid, rid)
+
+        _save_collections()
+        # found 便于调用方区分「本来就不在」与「删过了」；老调用方只看 ok 不受影响
+        return {"ok": True, "removed": removed, "found": hit is not None}
 
 @app.post("/api/collection/{cid}/items/move")
 def move_items(cid: str, req: MoveItemsReq, sid: str = Depends(current_identity)):
@@ -2403,7 +2456,7 @@ def delete_files(req: DeleteFilesReq, sid: str = Depends(current_identity)):
                 # （与资源是否停在 admin 回收站无关；判定只看 owner 本人正常合集是否还持有 rid）
                 still_has = any(
                     c.get("id") != "__trash__" and any(
-                        (it.get("resource_id") or "") == rid for it in c.get("items", [])
+                        _rid_of_item(it) == rid for it in c.get("items", [])
                     )
                     for c in cols
                 )
