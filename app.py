@@ -1243,13 +1243,17 @@ import hashlib
 SUB_EXT = (".srt", ".vtt", ".ass", ".lrc")
 
 def _resource_paths(owner, rid):
-    """返回某 owner 合集中属于 resource_id=rid 的全部物理文件路径集合
-    （视频主文件 + 字幕 + 关联 AI 文章）。用于共享令牌授权校验。"""
+    """返回某 owner 合集中属于 rid 的全部物理文件路径集合
+    （视频主文件 + 字幕 + 关联 AI 文章 + 正文图片）。用于共享令牌授权校验。
+
+    匹配口径与 _find_resource 一致，走 _rid_of_item：只有 rel_path 的条目
+    （采集器经 add_collection_item 建的）也能正确放行字幕/图片等衍生物，
+    否则令牌能签发、主文件靠令牌快照兜底可下，附属文件却全部 404。"""
     cols = _sid_collections(owner)
     paths = set()
     for c in cols:
         for it in c.get("items", []):
-            if it.get("resource_id") == rid:
+            if _rid_of_item(it) == rid:
                 if it.get("rel_path"):
                     paths.add(it["rel_path"].replace("\\", "/"))
                 # P0-5（2026-11-19）：共享文章时放行正文图片。必须与 rel_path 平级放在
@@ -1259,7 +1263,7 @@ def _resource_paths(owner, rid):
                 if it.get("subtitle"):
                     sub = it["subtitle"].replace("\\", "/")
                     paths.add(sub)
-                    arts = _article_rels_for_resource(it.get("resource_id"), it.get("body_key8"), owner)
+                    arts = _article_rels_for_resource(_rid_of_item(it), it.get("body_key8"), owner)
                     if arts:
                         paths.update(arts)
     return paths
@@ -1332,7 +1336,9 @@ def serve_file(name: str, share: str = None, sid: str = Depends(current_identity
             for c in _sid_collections(sid):
                 if c.get("id") == "__trash__":
                     continue
-                if any(it.get("resource_id") == _rid for it in c.get("items", [])):
+                # 判据与 _find_resource 一致：只有 rel_path 的条目也要能播放/下载，
+                # 否则采集器建的条目在媒体库里能看到却打不开。
+                if any(_rid_of_item(it) == _rid for it in c.get("items", [])):
                     _ok = True
                     break
             if _ok:
@@ -1560,12 +1566,19 @@ class ShareCreateReq(BaseModel):
     ttl_option: str = "default"   # "default" / 数字天数 / "permanent"
 
 def _find_resource(owner, rid):
-    """在 owner 合集里找 resource_id 匹配的资源，返回 (item, allowed_paths)。
-    找不到返回 (None, None)。allowed_paths 含主文件 + 字幕等衍生物。"""
+    """在 owner 合集里找 rid 匹配的资源，返回 (item, allowed_paths)。
+    找不到返回 (None, None)。allowed_paths 含主文件 + 字幕等衍生物。
+
+    匹配口径统一走 _rid_of_item（resource_id 优先，rel_path 兜底）：采集器/脚本经
+    add_collection_item 建的条目只有 rel_path，若此处只认 resource_id，这类资源
+    无法签发分享（POST /api/share 报「资源不存在或不属于你」）、也拿不到分享页
+    元数据与 OCR 入口。"""
+    if not rid:
+        return None, None
     cols = _sid_collections(owner)
     for c in cols:
         for it in c.get("items", []):
-            if it.get("resource_id") == rid:
+            if _rid_of_item(it) == rid:
                 paths = set()
                 if it.get("rel_path"):
                     paths.add(it["rel_path"].replace("\\", "/"))
@@ -1917,7 +1930,8 @@ def trash_restore(req: TrashRestoreReq, sid: str = Depends(current_identity)):
         default = next((c for c in tcols if c.get("id") == "default"), None)
         if not default:
             raise HTTPException(400, "目标用户无默认合集")
-        if not any(it.get("resource_id") == rid for it in default["items"]):
+        # 去重判据同上：目标合集里若已有同资源的 rel_path-only 条目，不再重复追加
+        if not any(_rid_of_item(it) == rid for it in default["items"]):
             snap = entry.get("item_snapshot")
             # 有完整快照 → 逐字还原（cover/subtitle/vid/subtitle_source 等全字段），
             # 否则退回最小字段重建（兼容旧版无快照的回收站条目，仅保证可播放）
@@ -3960,12 +3974,13 @@ def _run_ocr_subtitle(task_id, sid, rid, force, fps=1.0):
                     t["message"] = msg
 
     try:
-        # 重新取最新条目（避免拿到过期引用）
+        # 重新取最新条目（避免拿到过期引用）；rid 匹配走 _rid_of_item，
+        # 与 _find_resource 同口径，兼容只有 rel_path 的条目。
         cols = _sid_collections(sid)
         item = None
         for c in cols:
             for it in c.get("items", []):
-                if it.get("resource_id") == rid:
+                if _rid_of_item(it) == rid:
                     item = it
                     break
             if item:
