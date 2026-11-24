@@ -41,6 +41,11 @@
   .link{color:var(--primary);cursor:pointer;font-size:13px;user-select:none}
   .muted{color:var(--sub);font-size:13px}
   .hidden{display:none}
+  /* ⚠️ .player-actions/.ph-acts/.sp-actions 里的 a.btn-ghost 自带 display:inline-flex 且定义更晚，
+     单类 .hidden 压不住（文章视图曾因此仍显示「保存视频/字幕/下载封面」）。同特异性补刀。 */
+  .player-actions a.btn-ghost.hidden,
+  .play-head .ph-acts a.btn-ghost.hidden,
+  .share-page .sp-actions a.btn-ghost.hidden{display:none}
   details summary{cursor:pointer;color:var(--sub);font-size:13px;list-style:none}
   details summary::-webkit-details-marker{display:none}
   details summary::before{content:"▸ "}
@@ -175,6 +180,25 @@
   .src-tag.tag-official{color:#27ae60;background:rgba(39,174,96,.12)}
   .lib-card .stale{color:var(--err);font-weight:600}
   .lib-empty{text-align:center;color:var(--sub);padding:48px 0;font-size:14px}
+  /* 富文本图文编辑器（开源部署图文生产闭环） */
+  .ae-tools{display:flex;gap:6px;flex-wrap:wrap;padding:8px;background:#f4f6fa;border:1px solid var(--line);border-radius:9px}
+  .ae-tools button{padding:5px 10px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--text);cursor:pointer;font-size:13px}
+  .ae-tools button:hover{border-color:#7aa7ff;background:#eef4ff}
+  .ae-body{min-height:320px;max-height:52vh;overflow:auto;padding:18px 22px;border:1px solid var(--line);border-radius:9px;
+    background:#fff;line-height:1.8;font-size:15px;outline:none}
+  .ae-body:empty:before{content:attr(data-placeholder);color:#b9c0cc}
+  .ae-body h2{font-size:22px;margin:20px 0 10px} .ae-body h3{font-size:18px}
+  .ae-body blockquote{border-left:4px solid #4a90e2;padding:8px 16px;margin:14px 0;background:#f7f9fc;color:#555}
+  .ae-body pre{background:#f6f6f6;padding:12px;border-radius:6px;overflow-x:auto;white-space:pre-wrap}
+  .ae-body code{background:#eef1f6;padding:1px 5px;border-radius:4px}
+  .ae-body img{max-width:100%;height:auto;display:block;margin:14px auto;border-radius:4px}
+  .ae-body a{color:#576b95}
+  .img-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px;max-height:52vh;overflow:auto}
+  .img-cell{position:relative;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#fafbfd}
+  .img-cell img{width:100%;aspect-ratio:1;object-fit:cover;display:block}
+  .img-cell .imeta{padding:6px 8px;font-size:11.5px;color:var(--sub);display:flex;justify-content:space-between;align-items:center;gap:4px}
+  .img-cell input[type=checkbox]{position:absolute;top:6px;left:6px;z-index:2}
+  .img-cell .used-tag{color:#2b6cb0;font-weight:600} .img-cell .unused-tag{color:#b09a2b}
   /* 批量选择 */
   .lib-card{position:relative}
   .lib-card .pick{position:absolute;top:8px;left:8px;width:20px;height:20px;accent-color:var(--primary);
@@ -232,6 +256,8 @@
   .pl-sec-body{padding:16px 22px;max-height:40vh;overflow-y:auto}
   .pl-sec-body.plain{white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.7;color:var(--text)}
   .player-actions{padding:10px 14px;border-top:1px solid var(--line);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  /* 文章模式下隐藏视频操作区：.player-actions 自带 display:flex 会盖掉 .hidden（同 .lib-batch 坑） */
+  .player-actions.hidden,.modal-foot.hidden{display:none}
   .player-actions a.btn-ghost{color:var(--text);text-decoration:none;display:inline-flex;align-items:center}
   .player-actions .muted{margin-left:auto}
   .playlist-panel{width:300px;flex:none;border-left:1px solid var(--line);padding:12px;overflow:hidden;display:flex;flex-direction:column;background:#fafbfc}
@@ -266,6 +292,25 @@
   .lib-card .sp-remove:hover{background:#e74c3c}
   /* 共享卡片的信息行：单行截断，避免「由 xxx 共享」和有效期被挤成两行 */
   .lib-card.shared .sub{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* ===== 文章 / 视频 分层标签（2026-11-23）=====
+     大类标签定点击行为（视频=播放器，文章=阅读器）；子类型(图文/贴图)与日期仅文章有。 */
+  .kind-tag{display:inline-block;padding:1px 7px;border-radius:6px;font-size:11px;line-height:1.6}
+  .kind-tag.k-video{color:#c2185b;background:rgba(251,114,153,.14)}
+  .kind-tag.k-article{color:#1d9e75;background:rgba(29,158,117,.13)}
+  .kind-tag.k-sub{color:#7c5cf6;background:rgba(124,92,246,.12)}
+  .kind-tag.k-date{color:var(--sub);background:transparent;padding-left:0}
+  .src-link{display:block;width:100%;margin-top:4px;font-size:12px;color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .src-link a{color:#576b95;text-decoration:none}
+  .src-link a:hover{text-decoration:underline}
+  .lib-card .kind-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px}
+  /* 文章阅读器：iframe sandbox 隔离，height 给足、可滚动 */
+  .article-reader{width:100%;height:72vh;min-height:420px;border:1px solid var(--line);
+    border-radius:12px;background:#fff;display:block}
+  /* 双类优先：否则 .article-reader{display:block} 会盖掉 .hidden */
+  .article-reader.hidden{display:none}
+  /* 全屏阅读：iframe 撑满视口；正文由采集端 body{max-width:760px;margin:0 auto} 居中限宽 */
+  .article-reader:fullscreen{width:100vw;height:100vh;min-height:0;border:0;border-radius:0;background:#fff}
+  #playerVideo.hidden,#plpVideo.hidden{display:none}
   .share-row{display:flex;gap:8px;align-items:center;margin-bottom:10px;font-size:13px}
   .share-row label{color:var(--sub);white-space:nowrap;min-width:82px}
   .share-row input[type=number],.share-row input[type=text]{padding:8px 10px;border:1px solid var(--line);
@@ -473,7 +518,9 @@
   </header>
 
   <nav class="tabs" data-page-node-id="IYCUae5uq6ZGMaD6HPyIyU">
-    <div class="tab active" id="tabLibrary" onclick="switchTab('library')" data-page-node-id="AHwukLByaaYe0T3p5xl1Fy">📚 我的媒体库</div>
+    <div class="tab active" id="tabAll" onclick="switchTab('all')" data-page-node-id="AHwukLByaaYe0T3p5xl1Fy">🗂 全部</div>
+    <div class="tab" id="tabVideo" onclick="switchTab('video')">📹 视频库</div>
+    <div class="tab" id="tabArticle" onclick="switchTab('article')">📄 图文库</div>
     <span class="spacer"></span>
     <button class="nav-act" id="btnTrash" onclick="openTrash()" title="回收站（引用归零的资源，物理保留，可清理/恢复）">♻ 回收站</button>
   </nav>
@@ -493,6 +540,7 @@
         <button class="btn-ghost btn-sm" id="btnPending" onclick="openPending()" title="查看未能自动匹配到资源的字幕/封面，可手动挂到资源或丢弃">📎 待补挂<span id="pendingBadge" class="hidden"></span></button>
         <button class="btn-ghost btn-sm" id="btnUpload" onclick="openUpload()" data-page-node-id="tSrfiE3LOHnTkdCjjSf8CI">⬆ 上传</button>
         <button class="btn-ghost btn-sm" id="btnImportDir" onclick="openImportDir()" data-page-node-id="rmImportDir">📂 目录导入</button>
+        <button class="btn-primary btn-sm" id="btnNewArticle" onclick="switchTab('article');openArtEditor()" title="用富文本编辑器新建图文（开源部署无需采集端）">✍️ 新建图文</button>
       </div>
       <div class="lib-batch hidden" id="libBatch" data-page-node-id="5zJyIJgQOloc0gnXBvjYID">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer" data-page-node-id="DFOGW184GPnk2rukrNCxKL">
@@ -517,11 +565,14 @@
     <div class="modal" data-page-node-id="GvOznB8IHSW2hjhzmFSjOB">
       <div class="modal-head" data-page-node-id="d07vKp5ECH31YhNxzirr9l">
         <div class="mt" id="playerTitle" data-page-node-id="OZQQQcSeLoFVKrMjWBSmTS"></div>
+        <button class="btn-ghost btn-sm hidden" id="playerFullBtn" onclick="toggleArticleFullscreen('playerArticle')" title="全屏阅读，按 Esc 退出">⛶ 全屏阅读</button>
         <button class="btn-ghost btn-sm" onclick="closePlayer()" data-page-node-id="gyCn85vMKMb9xdCo75tqxO">关闭</button>
       </div>
       <div class="modal-body" data-page-node-id="2rp1kReBogjHzEH3EgoABA">
         <div class="player-col" data-page-node-id="h5EFzHypBVG3CdWoy06FrV">
           <video id="playerVideo" controls preload="metadata" data-page-node-id="WLaly57QcuSoGVmlAeT6zR"></video>
+          <!-- 文章阅读器：sandbox 隔离（无 allow-same-origin），与 video 互斥显示 -->
+          <iframe id="playerArticle" class="article-reader hidden" sandbox title="公众号文章正文"></iframe>
           <div class="player-actions" id="playerActions" data-page-node-id="Jgjyd1l4J6qorCSsQ0hZ3i">
             <a id="dlVideoBtn" class="btn-ghost btn-sm" href="#" download data-page-node-id="dVp7a9Je6j4vkt7VAxaCcT">⬇ 保存视频</a>
             <a id="dlSubBtn" class="btn-ghost btn-sm" href="#" download data-page-node-id="FE42aNNjtftTGUuqTDY0hZ">⬇ 字幕(TXT)</a>
@@ -574,6 +625,72 @@
       </div>
     </div>
   </div>
+  <!-- 富文本图文编辑器（开源部署图文生产闭环，2026-11-24） -->
+  <div class="modal-mask hidden" id="artEditorMask" onclick="if(event.target===this)closeArtEditor()">
+    <div class="modal" style="width:min(900px,96vw);max-height:94vh">
+      <div class="modal-head">
+        <div class="mt" id="artEditorTitle">✍️ 新建图文</div>
+        <button class="btn-ghost btn-sm" onclick="closeArtEditor()">关闭</button>
+      </div>
+      <div class="modal-body" style="flex-direction:column;padding:14px;gap:12px;overflow:auto">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <span class="muted">标题：</span>
+          <input type="text" id="aeTitle" placeholder="图文标题" style="flex:1;min-width:240px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;outline:none;background:#fbfcfe;color:var(--text);font-size:15px">
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span class="muted">日期：</span><input type="date" id="aeDate" style="padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fbfcfe;color:var(--text)">
+          <span class="muted">类型：</span><input type="text" id="aeType" placeholder="图文/贴图…" style="width:110px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fbfcfe;color:var(--text)">
+          <span class="muted">来源 URL：</span><input type="text" id="aeUrl" placeholder="可选" style="flex:1;min-width:160px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fbfcfe;color:var(--text)">
+          <select id="aeColl" title="目标合集" style="padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fbfcfe;color:var(--text)"></select>
+        </div>
+        <div class="ae-tools" id="aeTools">
+          <button type="button" data-cmd="bold" title="粗体"><b>B</b></button>
+          <button type="button" data-cmd="italic" title="斜体"><i>I</i></button>
+          <button type="button" data-cmd="underline" title="下划线"><u>U</u></button>
+          <button type="button" data-cmd="formatBlock" data-val="h2" title="小标题">H2</button>
+          <button type="button" data-cmd="formatBlock" data-val="p" title="正文">¶</button>
+          <button type="button" data-cmd="insertUnorderedList" title="列表">• 列表</button>
+          <button type="button" data-cmd="insertOrderedList" title="编号">1. 列表</button>
+          <button type="button" data-cmd="formatBlock" data-val="blockquote" title="引用">❝ 引用</button>
+          <button type="button" data-cmd="formatBlock" data-val="pre" title="代码块">{ }</button>
+          <button type="button" data-cmd="insertHorizontalRule" title="分隔线">―</button>
+          <button type="button" data-action="blueTitle" title="蓝色标题（上下横线+左侧竖条，复刻公众号原文样式）">🏷 蓝色标题</button>
+          <button type="button" onclick="openImagePicker()" title="插入图片">🖼 图片</button>
+        </div>
+        <div id="aeBody" class="ae-body" contenteditable="true" data-placeholder="在这里撰写图文正文…"></div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="btn-primary btn-sm" onclick="saveArtEditor()">💾 保存图文</button>
+          <button class="btn-ghost btn-sm" onclick="_imgPickFor='manage';openImageLibrary()">🖼 管理图片库</button>
+          <span id="aeMsg" class="muted"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 图片库面板（用户隔离资产：上传 / 选图 / used 标记 / 手动清理） -->
+  <div class="modal-mask hidden" id="imageLibMask" onclick="if(event.target===this)closeImageLibrary()">
+    <div class="modal" style="width:min(840px,96vw);max-height:92vh">
+      <div class="modal-head">
+        <div class="mt">🖼 图片库（仅你可见）</div>
+        <button class="btn-ghost btn-sm" onclick="closeImageLibrary()">关闭</button>
+      </div>
+      <div class="modal-body" style="flex-direction:column;padding:14px;gap:12px;overflow:auto">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <input type="file" id="imgUploadInput" multiple accept=".png,.jpg,.jpeg,.webp,.gif">
+          <button class="btn-primary btn-sm" onclick="uploadImages()">⬆ 上传图片</button>
+          <button class="btn-ghost btn-sm" id="btnInsertImgs" onclick="insertPickedImages()">↳ 插入正文</button>
+          <button class="btn-danger btn-sm" id="btnTrashImgs" onclick="trashSelectedImages()">♻ 移入回收站</button>
+          <button class="btn-ghost btn-sm hidden" id="btnRestoreImgs" onclick="restoreSelectedImages()">↩ 恢复</button>
+          <button class="btn-danger btn-sm hidden" id="btnPurgeImgs" onclick="purgeSelectedImages()">🗑 永久删除</button>
+          <button class="btn-ghost btn-sm" id="btnToggleImgTrash" onclick="toggleImageTrashView()">🗑 回收站</button>
+          <span class="muted" id="imgLibHint">正在使用的图不可移入回收站（避免文章破图）</span>
+        </div>
+        <div id="imgGrid" class="img-grid"></div>
+        <div id="imgLibMsg" class="muted"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- 目录导入弹窗（服务端目录，复制语义，源文件不移动） -->
   <div class="modal-mask hidden" id="importDirMask" onclick="if(event.target===this)closeImportDir()">
     <div class="modal" style="width:min(560px,96vw)">
@@ -836,6 +953,8 @@
           <a id="plpDlCover" class="btn-ghost btn-sm hidden" href="#" download>⬇ 下载封面</a>
           <a id="plpDlArt" class="btn-ghost btn-sm hidden" href="#" download>⬇ 导出文章</a>
           <button id="plpAttach" class="btn-ghost btn-sm hidden" onclick="openAttachDialog(_ppItems[_ppIdx])">📎 补录字幕/封面</button>
+          <button id="plpEditArt" class="btn-ghost btn-sm hidden" onclick="openArtEditorForItem(_ppItems[_ppIdx])" title="编辑这篇图文（归档文章将派生副本，原文不动）">✎ 编辑图文</button>
+          <button id="plpFullBtn" class="btn-ghost btn-sm hidden" onclick="toggleArticleFullscreen('plpArticle')" title="全屏阅读，按 Esc 退出">⛶ 全屏阅读</button>
           <a id="plpBack" class="btn-ghost btn-sm" href="/">← 返回媒体库</a>
         </div>
       </div>
@@ -843,6 +962,7 @@
       <div class="play-grid">
         <div class="play-main">
           <video id="plpVideo" controls preload="metadata"></video>
+          <iframe id="plpArticle" class="article-reader hidden" sandbox title="公众号文章正文"></iframe>
           <div id="plpExtras"></div>
         </div>
         <aside class="play-side">
@@ -976,6 +1096,12 @@ document.addEventListener("DOMContentLoaded", () => {
 function fmtDur(s){ s=Math.round(s); const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
   return (h?h+":":"")+String(m).padStart(h?2:1,"0")+":"+String(x).padStart(2,"0"); }
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+/* 来源 URL：仅放行 http/https，杜绝 javascript: 等危险协议；新标签打开并加 noopener。 */
+function _sourceUrlHtml(u){
+  const s = String(u == null ? "" : u).trim();
+  if(!s || !/^https?:\/\//i.test(s)) return "";
+  return `<span class="src-link">来源：<a href="${esc(s)}" target="_blank" rel="noopener noreferrer">${esc(s)}</a></span>`;
+}
 
 /* ==================== 媒体库 / 在线播放器 ==================== */
 let libData = { collections: [] };
@@ -983,12 +1109,23 @@ let currentLibItem = null;
 let _libProgBound = false;
 let _sel = new Set();   // 当前选中的视频 rel_path 集合（批量操作用）
 
-function switchTab(tab){
-  const dl = tab === "download";
-  document.getElementById("libraryView").classList.toggle("hidden", dl);
-  document.getElementById("tabLibrary").classList.toggle("active", !dl);
-  if(!dl) loadLibrary();
-  if(dl) closePlayer();          // 切回媒体库时关闭播放器弹窗
+/* 三个 tab 只做「类型筛选」，合集下拉与数据完全共用（2026-11-24）。
+   _libKind: all | video | article，默认 all（等同原「我的媒体库」的全量视图）。 */
+let _libKind = "all";
+function switchTab(kind){
+  _libKind = (kind === "video" || kind === "article") ? kind : "all";
+  ["All","Video","Article"].forEach(k=>{
+    const el = document.getElementById("tab" + k);
+    if(el) el.classList.toggle("active", k.toLowerCase() === _libKind);
+  });
+  document.getElementById("libraryView").classList.remove("hidden");
+  closePlayer();                 // 切换类型视图时关闭播放器弹窗，避免残留
+  loadLibrary();
+}
+/* 按当前 tab 过滤条目。_isArticle 双判兼容老数据/回收站快照（见上文）。 */
+function _filterByKind(items){
+  if(_libKind === "all") return items;
+  return (items||[]).filter(it => _isArticle(it) === (_libKind === "article"));
 }
 
 document.addEventListener("keydown", (e)=>{
@@ -1025,9 +1162,13 @@ async function renderLibGrid(){
   const isTrash = (cid === "__trash__");   // 下拉里的回收站系统项
   const coll = (libData.collections||[]).find(c=>c.id===cid) || {items:[]};
   const isShared = !!coll.shared;   // 「被共享」虚拟合集：他人资源，只读
+  const items = _filterByKind(coll.items);   // 当前 tab 的类型筛选结果；卡片下标 i 以此为基准
   const grid = document.getElementById("libGrid");
   const empty = document.getElementById("libEmpty");
-  document.getElementById("libCount").textContent = isTrash ? `回收站 ${coll.items.length} 个` : `共 ${coll.items.length} 个视频`;
+  const kindLabel = _libKind === "video" ? "个视频" : (_libKind === "article" ? "篇文章" : "条资源");
+  document.getElementById("libCount").textContent = isTrash
+    ? `回收站 ${coll.items.length} 个`
+    : `共 ${items.length} ${kindLabel}`;
   // 「默认合集」「被共享」与「回收站」均不可重命名/删除
   const locked = (cid === "default") || isShared || isTrash;
   const bR = document.getElementById("btnRenameColl");
@@ -1048,9 +1189,13 @@ async function renderLibGrid(){
     ? "回收站是空的。"
     : isShared
     ? "「被共享」还是空的。打开别人发来的分享链接，点「📥 加入我的媒体库」即可收进来。"
-    : "该合集还没有视频。可上传或目录导入后，会自动收录到这里。";
+    : _libKind === "video"
+    ? "该合集下没有视频（图文已归到「图文库」）。"
+    : _libKind === "article"
+    ? "该合集下没有图文（视频已归到「视频库」）。"
+    : "该合集还没有内容。可上传或目录导入后，会自动收录到这里。";
   if(isTrash){ await renderTrashGrid(); return; }
-  if(!coll.items.length){
+  if(!items.length){
     grid.innerHTML = "";
     empty.classList.remove("hidden");
     clearSelection();
@@ -1058,7 +1203,7 @@ async function renderLibGrid(){
   }
   empty.classList.add("hidden");
   await loadArticleIndex();
-  grid.innerHTML = coll.items.map((it, i) => {
+  grid.innerHTML = items.map((it, i) => {
     const cover = it.cover
       ? `<img class="thumb" data-cover="1" src="/api/thumbnail-cache/${encodeURIComponent(it.cover)}">`
       : `<div class="thumb-ph">无封面</div>`;
@@ -1094,10 +1239,11 @@ async function renderLibGrid(){
     if(isShared){
       // 只读卡片：无勾选框、无「🔗 共享」（不能再转共享）、左上角「移出」
       const b = _shareBadge(it);
-      // 失效条目不给播放入口（新标签 / 弹窗都点不动）
-      const pvRow = b.dead ? ""
-        : `<div class="pv-row"><button class="pv-btn" title="在当前页面弹窗里快速预览（不跳转）"
-             onclick="event.stopPropagation();playLibItem(${i})">▢ 弹窗预览</button></div>`;
+      const isArt = _isArticle(it);
+      // 失效条目不给浏览入口（新标签 / 弹窗都点不动）
+      const pvRow = b.dead ? "" : `<div class="pv-row"><button class="pv-btn"
+             title="${isArt?"在当前页面弹窗里阅读正文（不跳转）":"在当前页面弹窗里快速预览（不跳转）"}"
+             onclick="event.stopPropagation();playLibItem(${i})">${isArt?"▢ 阅读正文":"▢ 弹窗预览"}</button></div>`;
       return `<div class="lib-card shared${b.dead?" sp-dead":""}" onclick="openPlayerTab(${i})">
         <span class="sp-status ${b.cls}">${b.text}</span>
         <button class="sp-remove" title="从「被共享」移出（不影响对方的文件）" onclick="event.stopPropagation();removeShared('${esc(it.share_token||"")}')">✕ 移出</button>
@@ -1105,6 +1251,7 @@ async function renderLibGrid(){
         ${cover}
         <div class="meta">
           <div class="t">${esc(it.title||it.rel_path)}</div>
+          <div class="kind-row">${_kindTags(it)}</div>
           <div class="sub sp-owner"><span>由 ${esc(it.share_owner||"对方")} 共享</span></div>
           <div class="sub">${b.detail}</div>
           ${pvRow}
@@ -1112,7 +1259,9 @@ async function renderLibGrid(){
         ${artBlock}
       </div>`;
     }
-    const dur = it.duration ? `<span>${fmtDur(it.duration)}</span>` : "";
+    const isArt = _isArticle(it);
+    // 文章卡片不显示时长 / 字幕来源 / OCR 入口（这些是视频专属），改显示类型与日期标签
+    const dur = (!isArt && it.duration) ? `<span>${fmtDur(it.duration)}</span>` : "";
     const stale = it.stale ? `<span class="stale">文件缺失</span>` : "";
     const _src = it.subtitle_source || "";
     // 官方字幕：随视频一并落盘的字幕文件，或显式标记为 "official"。
@@ -1130,7 +1279,7 @@ async function renderLibGrid(){
     // 注：artBtn / arts / artBlock 已在上方（isShared 之前）统一定义，此处两个分支共用，不再重复声明
     const ocrBtnTop = it.subtitle ? 76 : 42;
     // data-rid 供「识别中」占用态使用：有任务在跑时据此高亮对应卡片、禁用其它卡片按钮
-    const ocrBtn = (it.shared || isOfficial) ? "" : (it.subtitle
+    const ocrBtn = (isArt || it.shared || isOfficial) ? "" : (it.subtitle
       ? `<button class="share-btn ocr-btn" data-rid="${esc(it.resource_id||"")}" style="top:${ocrBtnTop}px" title="重新识别内嵌硬字幕（会覆盖现有字幕文件；可选择识别密度）" onclick="event.stopPropagation();rerunOcrSubtitle(${i})">🔄 重新识别</button>`
       : `<button class="share-btn ocr-btn" data-rid="${esc(it.resource_id||"")}" style="top:${ocrBtnTop}px" title="识别视频内嵌的硬字幕（需视频本身带字幕条；可选择识别密度）" onclick="event.stopPropagation();runOcrSubtitle(${i})">🔤 识别字幕</button>`);
     return `<div class="lib-card${picked}" onclick="openPlayerTab(${i})">
@@ -1143,9 +1292,11 @@ async function renderLibGrid(){
       ${cover}
       <div class="meta">
         <div class="t">${esc(it.title||it.rel_path)}</div>
+        <div class="kind-row">${_kindTags(it)}</div>
         <div class="sub">${dur}${subTag}${stale}</div>
-        <div class="pv-row"><button class="pv-btn" title="在当前页面弹窗里快速预览（不跳转）"
-          onclick="event.stopPropagation();playLibItem(${i})">▢ 弹窗预览</button></div>
+        <div class="pv-row"><button class="pv-btn" title="${isArt?"在当前页面弹窗里阅读正文（不跳转）":"在当前页面弹窗里快速预览（不跳转）"}"
+          onclick="event.stopPropagation();playLibItem(${i})">${isArt?"▢ 阅读正文":"▢ 弹窗预览"}</button>${isArt
+          ? `<button class="pv-btn" title="编辑这篇图文（归档文章派生副本，原文不动）" onclick="event.stopPropagation();openArtEditorForItem(currentCollItems()[${i}])">✎ 编辑</button>` : ""}</div>
       </div>
       ${artBlock}
     </div>`;
@@ -1161,6 +1312,111 @@ async function renderLibGrid(){
   updateBatchBar();
   refreshPendingBadge();
   _ocrApplyBusyUI();   // 重新渲染卡片后恢复「识别中」占用态（任务进行中切换合集也保持一致）
+}
+
+/* ---- 文章 / 视频 类型判定与标签（2026-11-23）----
+   大类用 media_type（新条目 article）/ source_type（回收站快照只有后者）双判，兼容老数据。
+   子类型与日期是新增可选字段，空串时降级不显示，无需数据迁移。 */
+function _isArticle(it){
+  return !!(it && (it.media_type === "article" || it.source_type === "wechat_article"));
+}
+function _kindTags(it){
+  const art = _isArticle(it);
+  const big = art
+    ? '<span class="kind-tag k-article">文章</span>'
+    : '<span class="kind-tag k-video">视频</span>';
+  const ct = art && it.content_type
+    ? `<span class="kind-tag k-sub">${esc(it.content_type)}</span>` : "";
+  const dt = art && it.published_at
+    ? `<span class="kind-tag k-date">${esc(it.published_at)}</span>` : "";
+  return `${big}${ct}${dt}`;
+}
+
+/* 把文章正文装进 sandbox iframe（2026-11-24 图片 401 治本）。
+   根因：网关 gw_sid 是 SameSite=Lax（gateway/config.py:18），sandbox iframe（无
+   allow-same-origin）里的 <img> 子资源请求不带 cookie → 网关 resolve_access 先于 RM
+   返回 401 {"detail":"unauthenticated"}，表现就是"样式有了、图全没了"。正文导航请求
+   按父页面 same-site 发 cookie 所以 200；此前本地直连 5007 不过网关，才复现不出。
+   治本：父页面（同源、带 cookie）先取正文，再逐张取图转 data: URI，最后把整份文档
+   （保留 <style>）注入 srcdoc。iframe 内零网络子资源，不依赖 cookie；自有/被共享
+   两条路径统一走这里，sandbox 空隔离不降级（脚本仍被拦）。 */
+async function _loadArticleIntoFrame(it, frame){
+  if(!frame || !it || !it.rel_path) return false;
+  const rel = it.rel_path.replace(/\\/g, "/");
+  const token = it.shared ? (it.share_token || "") : "";
+  const shareQ = token ? ("?share=" + encodeURIComponent(token)) : "";
+  const dir = rel.replace(/\/[^/]*$/, "");              // resources/<rid>/<body_key8>
+  try{
+    const r = await fetch("/api/files/" + encodeURI(rel) + shareQ);
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    const htmlText = await r.text();
+    const doc = new DOMParser().parseFromString(htmlText, "text/html");
+    const imgs = Array.from(doc.querySelectorAll("img[src]"));
+    await Promise.all(imgs.map(async img=>{
+      const s = img.getAttribute("src") || "";
+      if(/^(?:data:|https?:|\/\/|#)/i.test(s)) return;  // data/外链不动（staging 已清外链）
+      let u;
+      if(/^\/api\/files\//i.test(s)){
+        u = token ? (s + (s.indexOf("?") >= 0 ? "&" : "?")
+          + "share=" + encodeURIComponent(token)) : s;
+      }else if(/^\/api\/image\//i.test(s)){
+        // 前端写入的图文：图片是用户资产区引用；共享视图追加 share token 按 owner 放行
+        u = token ? (s + (s.indexOf("?") >= 0 ? "&" : "?")
+          + "share=" + encodeURIComponent(token)) : s;
+      }else{
+        const seg = s.split("/").map(encodeURIComponent).join("/"); // 按段编码，保留分隔符
+        u = "/api/files/" + dir + "/" + seg + shareQ;
+      }
+      try{
+        const ir = await fetch(u, {credentials:"same-origin"});
+        if(!ir.ok) throw new Error("HTTP " + ir.status);
+        const blob = await ir.blob();
+        const ct = ir.headers.get("content-type") || "";
+        const ext = (s.match(/\.(png|jpe?g|gif|webp)$/i) || [])[1] || "png";
+        const mime = ct.indexOf("image/") === 0 ? ct.split(";")[0]
+          : ({jpg:"image/jpeg", jpeg:"image/jpeg", png:"image/png",
+              gif:"image/gif", webp:"image/webp"}[ext.toLowerCase()] || "image/png");
+        const dataUrl = await new Promise((resolve, reject)=>{
+          const fr = new FileReader();
+          fr.onload = ()=>resolve(String(fr.result));
+          fr.onerror = ()=>reject(new Error("图片读取失败"));
+          fr.readAsDataURL(new Blob([blob], {type:mime}));
+        });
+        img.setAttribute("src", dataUrl);
+      }catch(e){
+        // 单张失败只降级占位，不让整篇文章跟着空白
+        img.setAttribute("src", "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==");
+        img.setAttribute("alt", (img.getAttribute("alt") || "图片") + "（加载失败）");
+      }
+    }));
+    frame.removeAttribute("src");
+    frame.srcdoc = "<!doctype html>" + doc.documentElement.outerHTML; // 保留 head 里的 <style>
+    return true;
+  }catch(e){
+    frame.removeAttribute("src");
+    frame.srcdoc = "<!doctype html><html><body style=\"font-family:sans-serif;padding:24px;color:#c0392b\">"
+      + "正文加载失败：" + esc(String(e.message||e)) + "</body></html>";
+    return false;
+  }
+}
+
+/* 文章全屏阅读：对 iframe 元素本身请求全屏（浏览器原生，Esc 退出）。
+   与视频的 <video controls> 原生全屏键体验一致；正文居中限宽由采集端模板负责。
+   iframe 是「被全屏」的元素，内部 sandbox 隔离不受影响，仍无脚本权限。 */
+async function toggleArticleFullscreen(frameId){
+  const el = document.getElementById(frameId);
+  if(!el){ return; }
+  try{
+    if(document.fullscreenElement === el){
+      await document.exitFullscreen();
+    }else{
+      if(document.fullscreenElement) await document.exitFullscreen();
+      await el.requestFullscreen();
+    }
+  }catch(e){
+    alert("全屏失败：" + (e && e.message ? e.message : e)
+      + "\n（若刚切换到文章，请点一下正文区域再试）");
+  }
 }
 
 /* ---- 「被共享」合集辅助 ---- */
@@ -1269,10 +1525,15 @@ async function batchDelete(){
   const items = [...document.querySelectorAll(".lib-card .pick")].filter(el=>_sel.has(el.dataset.rel))
     .map(el=>({rel_path: el.dataset.rel, subtitle: el.dataset.sub||""}));
   const hasResource = items.some(it => (it.rel_path||"").startsWith("resources/"));
+  // 文案区分视频 / 图文（两者删除逻辑共用 /api/files/delete，但提示不该写死「视频」）
+  const artCount = items.filter(it=>/\.html?$/i.test(it.rel_path||"")).length;
+  const vidCount = items.length - artCount;
+  const kindTxt = artCount && vidCount ? `${vidCount} 个视频、${artCount} 篇图文`
+    : artCount ? `${artCount} 篇图文` : `${vidCount} 个视频`;
   const note = hasResource
-    ? "\n\n其中资源池视频：删除仅移除你的引用（不删文件）；若为最后一份引用，将进入管理员回收站，由管理员决定是否清理。"
+    ? "\n\n其中资源池内容：删除仅移除你的引用（不删文件）；若为最后一份引用，将进入管理员回收站，由管理员决定是否清理。"
     : "\n\n此操作不可恢复。";
-  if(!confirm(`确定删除选中的 ${_sel.size} 个视频？` + note)) return;
+  if(!confirm(`确定删除选中的 ${kindTxt}？` + note)) return;
   const r = await fetch("/api/files/delete", {
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({items})
@@ -1284,7 +1545,7 @@ async function batchDelete(){
     if(j.trashed_resources && j.trashed_resources.length){
       msg += `\n\n${j.trashed_resources.length} 个资源已从你的库移除引用且当前无活跃引用，已进入管理员回收站（物理保留，由管理员决定是否清理）。`;
     }
-    if(j.missing && j.missing.length) msg += `\n${j.missing.length} 个视频文件原本已缺失（仅清理了合集记录）。`;
+    if(j.missing && j.missing.length) msg += `\n${j.missing.length} 个文件原本已缺失（仅清理了合集记录）。`;
     alert(msg); }
   else { const e=await r.json().catch(()=>({})); alert("删除失败："+(e.detail||r.status)); }
 }
@@ -1292,7 +1553,8 @@ async function batchDelete(){
 function currentCollItems(){
   const sel = document.getElementById("libColl");
   const coll = (libData.collections||[]).find(c=>c.id===sel.value);
-  return coll ? coll.items : [];
+  // 与 renderLibGrid 用同一份筛选结果，保证卡片下标 i 在所有操作里指向同一条目
+  return _filterByKind(coll ? coll.items : []);
 }
 
 // ---- 回收站（T88）：仅管理员可访问，资源物理保留，可清理/恢复 ----
@@ -1333,6 +1595,7 @@ async function renderTrashGrid(){
         ${cover}
         <div class="meta">
           <div class="t">${tn}</div>
+          <div class="kind-row">${_kindTags(snap)}</div>
           <div class="sub"><span class="${it.physical_exists?'':'stale'}">${phys}</span> · 活跃引用 ${it.active_refs||0}</div>
         </div>
         <div class="trash-actions">
@@ -2383,8 +2646,8 @@ function renderMarkdownLite(md){
 /* 条目可播性检查：返回阻止原因（空串 = 可播）。新标签页与弹窗共用同一套判断。 */
 function _itemBlocked(it){
   if(!it) return "条目不存在";
-  if(!it.rel_path) return "该视频文件已不存在（可能被清理）";
-  if(it.stale) return "该视频文件已不存在（可能被清理）";
+  if(!it.rel_path) return "该文件已不存在（可能被清理）";
+  if(it.stale) return "该文件已不存在（可能被清理）";
   if(it.shared && it.share_status && it.share_status !== "active"){
     const why = it.share_status === "expired" ? "该共享已过期"
       : it.share_status === "revoked" ? "对方已取消共享" : "分享链接已失效";
@@ -2400,12 +2663,14 @@ function openPlayerTab(i){
   const blocked = _itemBlocked(it);
   if(blocked){ alert(blocked); return; }
   const cid = document.getElementById("libColl").value || "default";
-  const url = location.origin + "/?play=1&coll=" + encodeURIComponent(cid) + "&i=" + i;
+  // 带上 kind，播放页按同一规则过滤，保证这里的可见下标 i 在新标签里指向同一条目
+  const url = location.origin + "/?play=1&coll=" + encodeURIComponent(cid) + "&i=" + i
+    + "&kind=" + encodeURIComponent(_libKind);
   const w = window.open(url, "_blank");
   if(!w) alert("浏览器拦截了新标签页，请允许本站弹出窗口后重试。");
 }
 
-function playLibItem(i){
+async function playLibItem(i){
   const items = currentCollItems();
   const it = items[i];
   if(!it) return;
@@ -2415,6 +2680,27 @@ function playLibItem(i){
   currentLibItem = it;
   document.getElementById("playerTitle").textContent = it.title || it.rel_path;
   const v = document.getElementById("playerVideo");
+  const frame = document.getElementById("playerArticle");
+  // 文章：video 与 iframe 互斥；隐藏视频专属操作区，异步装正文
+  if(_isArticle(it)){
+    v.pause(); v.removeAttribute("src"); v.load(); v.classList.add("hidden");
+    frame.classList.remove("hidden");
+    document.getElementById("playerActions").classList.add("hidden");
+    document.getElementById("playerFullBtn").classList.remove("hidden");
+    const foot = document.querySelector("#playerMask .modal-foot");
+    if(foot) foot.classList.add("hidden");
+    const ex = document.getElementById("playerExtras"); if(ex) ex.innerHTML = "";
+    document.getElementById("playerMask").classList.remove("hidden");
+    await _loadArticleIntoFrame(it, frame);
+    renderPlaylist(items, i);
+    return;
+  }
+  frame.classList.add("hidden"); frame.removeAttribute("src"); frame.removeAttribute("srcdoc");
+  document.getElementById("playerActions").classList.remove("hidden");
+  document.getElementById("playerFullBtn").classList.add("hidden");
+  const footV = document.querySelector("#playerMask .modal-foot");
+  if(footV) footV.classList.remove("hidden");
+  v.classList.remove("hidden");
   v.src = mediaUrl;
   v.load();
 
@@ -2634,7 +2920,18 @@ function bindPlayerProgress(){
 
 function closePlayer(){
   const v = document.getElementById("playerVideo");
-  v.pause(); v.removeAttribute("src"); v.load();
+  v.pause(); v.removeAttribute("src"); v.load(); v.classList.remove("hidden");
+  const frame = document.getElementById("playerArticle");
+  if(frame){
+    if(document.fullscreenElement === frame){ try{ document.exitFullscreen(); }catch(e){} }
+    frame.classList.add("hidden"); frame.removeAttribute("src"); frame.removeAttribute("srcdoc");
+  }
+  const fullBtn = document.getElementById("playerFullBtn");
+  if(fullBtn) fullBtn.classList.add("hidden");
+  const acts = document.getElementById("playerActions");
+  if(acts) acts.classList.remove("hidden");
+  const foot = document.querySelector("#playerMask .modal-foot");
+  if(foot) foot.classList.remove("hidden");
   document.getElementById("playerMask").classList.add("hidden");
   const box = document.getElementById("playerExtras");
   if(box) box.innerHTML = "";
@@ -2739,6 +3036,353 @@ async function doUpload(){
     xhr.open("POST", "/api/upload");
     xhr.send(fd);
   });
+}
+
+/* ==================== 富文本图文编辑器 + 图片资产库（开源生产闭环） ====================
+   设计见 wechat-archive/docs/公众号图文富样式-治本方案.md §8。
+   图片是用户隔离的独立资产（/api/image/<id>），文章引用而非复制；未使用者由用户手动清理。 */
+let _aeEditingRid = "";       // 非空=编辑已有文章（复用 rid，旧版本入回收站）
+let _aeDerive = false;        // true=从归档文章派生副本（清 rid 新建 + 图片归一，原文不动）
+let _aeImages = [];           // 图片库当前列表
+let _imgPickFor = "editor";   // 图片选择器来源
+
+function openArtEditor(rid){
+  _aeEditingRid = rid || "";
+  _aeDerive = false;
+  document.getElementById("artEditorTitle").textContent = rid ? "✍️ 编辑图文" : "✍️ 新建图文";
+  document.getElementById("aeTitle").value = "";
+  document.getElementById("aeDate").value = "";
+  document.getElementById("aeType").value = "";
+  document.getElementById("aeUrl").value = "";
+  document.getElementById("aeBody").innerHTML = "";
+  document.getElementById("aeMsg").textContent = "";
+  fillCollSelect(document.getElementById("aeColl"));
+  document.getElementById("artEditorMask").classList.remove("hidden");
+}
+function closeArtEditor(){ document.getElementById("artEditorMask").classList.add("hidden"); }
+
+/* 从媒体库条目打开编辑器（统一入口：归档文章 / 本地图文都走这里）。
+   - 归档文章（正文含相对文件名图片 img_XXXX.jpg）→ 派生副本：读回正文、图片转 data URI
+     显示，保存时再上传成 /api/image/<id> 归一，清 rid 新建，原文快照不动。
+   - 本地图文（图片已是 /api/image/<id> 或无图）→ 原地编辑：复用 rid 覆盖。
+   图片用 data URI 而非直链，避开网关 iframe 子资源 401（与阅读器 _loadArticleIntoFrame 同理）。 */
+async function openArtEditorForItem(it){
+  if(!it || !it.rel_path){ alert("该条目没有正文文件，无法编辑"); return; }
+  if(it.shared){ alert("别人共享给你的资源是只读的，无法编辑。"); return; }
+  const rel = it.rel_path.replace(/\\/g, "/");
+  let htmlText;
+  try{
+    const r = await fetch("/api/files/" + encodeURI(rel));
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    htmlText = await r.text();
+  }catch(e){ alert("读取文章正文失败：" + e.message); return; }
+  const doc = new DOMParser().parseFromString(htmlText, "text/html");
+  // 归档判定：正文里存在「相对文件名」图片（img_XXXX.jpg）→ 采集快照，走派生
+  const isArchived = Array.from(doc.querySelectorAll("img[src]")).some(img=>{
+    const s = img.getAttribute("src") || "";
+    return s && !/^(?:data:|https?:|\/\/|\/api\/image\/|#)/i.test(s);
+  });
+  // 标题：正文 h1 优先，退回条目 title；随后剥掉 h1 与 meta 段，避免保存时套两层
+  const h1 = doc.querySelector("h1");
+  const title = (h1 && h1.textContent.trim()) || it.title || "未命名图文";
+  if(h1) h1.remove();
+  const metaP = doc.querySelector("p > small");
+  if(metaP && metaP.parentElement) metaP.parentElement.remove();
+  // 图片转 data URI：归档相对名 → /api/files/<dir>/<name>；本地 /api/image/<id> 直取
+  const dir = rel.replace(/\/[^/]*$/, "");
+  await Promise.all(Array.from(doc.querySelectorAll("img[src]")).map(async img=>{
+    const s = img.getAttribute("src") || "";
+    if(/^(?:data:|https?:|\/\/|#)/i.test(s)) return;
+    const u = /^\/api\/image\//i.test(s)
+      ? s
+      : "/api/files/" + dir + "/" + s.split("/").map(encodeURIComponent).join("/");
+    try{
+      const ir = await fetch(u, {credentials:"same-origin"});
+      if(!ir.ok) throw new Error("HTTP " + ir.status);
+      const blob = await ir.blob();
+      const ct = ir.headers.get("content-type") || "";
+      const mime = ct.indexOf("image/") === 0 ? ct.split(";")[0]
+        : ({jpg:"image/jpeg",jpeg:"image/jpeg",png:"image/png",gif:"image/gif",webp:"image/webp"}
+           [(s.match(/\.(png|jpe?g|gif|webp)$/i)||[])[1]?.toLowerCase()] || "image/png");
+      img.setAttribute("src", await new Promise((resolve, reject)=>{
+        const fr = new FileReader();
+        fr.onload = ()=>resolve(String(fr.result));
+        fr.onerror = ()=>reject(new Error("图片读取失败"));
+        fr.readAsDataURL(new Blob([blob], {type:mime}));
+      }));
+    }catch(e){
+      img.setAttribute("src", "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==");
+      img.setAttribute("alt", (img.getAttribute("alt") || "图片") + "（加载失败）");
+    }
+  }));
+  // 回填表单
+  _aeDerive = isArchived;
+  _aeEditingRid = isArchived ? "" : (it.resource_id || "");
+  document.getElementById("artEditorTitle").textContent = isArchived
+    ? "✍️ 编辑图文（将派生副本，原文保留）" : "✍️ 编辑图文";
+  document.getElementById("aeTitle").value = title;
+  document.getElementById("aeDate").value = it.published_at || "";
+  document.getElementById("aeType").value = it.content_type || "";
+  document.getElementById("aeUrl").value = it.url || "";
+  document.getElementById("aeBody").innerHTML = doc.body.innerHTML;
+  document.getElementById("aeMsg").textContent = "";
+  fillCollSelect(document.getElementById("aeColl"));
+  const collSel = document.getElementById("libColl");
+  const aeColl = document.getElementById("aeColl");
+  if(collSel && collSel.value && Array.from(aeColl.options).some(o=>o.value===collSel.value)){
+    aeColl.value = collSel.value;
+  }
+  document.getElementById("artEditorMask").classList.remove("hidden");
+}
+
+/* 派生模式保存前：把正文里的 data URI 图片上传成用户资产，src 换成 /api/image/<id>。
+   健壮性：单张失败保留 data URI（清洗器放行），不让整篇保存失败。 */
+async function _normalizeEditorImages(){
+  const body = document.getElementById("aeBody");
+  const imgs = Array.from(body.querySelectorAll('img[src^="data:image/"]'));
+  if(!imgs.length) return;
+  const fd = new FormData();
+  let attached = 0;
+  imgs.forEach((img, idx)=>{
+    const src = img.getAttribute("src") || "";
+    const m = /^data:image\/([a-zA-Z0-9]+);base64,(.*)$/s.exec(src);
+    if(!m) return;
+    const bin = atob(m[2]);
+    const u8 = new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
+    const ext = m[1].toLowerCase() === "jpeg" ? "jpg" : m[1].toLowerCase();
+    fd.append("files", new File([u8], "editor_" + Date.now() + "_" + idx + "." + ext,
+      {type:"image/" + m[1]}));
+    img.dataset.aeNormIdx = String(attached++);
+  });
+  if(!attached) return;
+  const r = await fetch("/api/image/upload", {method:"POST", body:fd});
+  const j = await r.json();
+  if(!r.ok) throw new Error(j.detail || r.status);
+  imgs.forEach(img=>{
+    const k = Number(img.dataset.aeNormIdx);
+    if(Number.isInteger(k) && j.items[k]) img.setAttribute("src", j.items[k].url);
+    delete img.dataset.aeNormIdx;
+  });
+}
+
+// 工具栏：execCommand（零依赖，内网可用）
+document.addEventListener("click", (e)=>{
+  const body = document.getElementById("aeBody");
+  const actionBtn = e.target.closest && e.target.closest("#aeTools button[data-action]");
+  if(actionBtn){
+    e.preventDefault();
+    body.focus();
+    if(actionBtn.dataset.action === "blueTitle") applyBlueTitle();
+    return;
+  }
+  const btn = e.target.closest && e.target.closest("#aeTools button[data-cmd]");
+  if(!btn) return;
+  e.preventDefault();
+  body.focus();
+  document.execCommand(btn.dataset.cmd, false, btn.dataset.val || null);
+  _cleanEditorPaste();
+});
+
+/* 蓝色标题：复刻公众号原文的「上下横线 + 左侧竖条 + 蓝色加粗」样式。
+   做法：先把当前块转成 h2，再给该 h2 套 inline style。样式值走服务端白名单
+   （border-top/bottom/left、color、font-weight、padding 均在白名单内）。
+   注意 execCommand 在 contenteditable 里对空的或未选中块的行为差异：
+   formatBlock 后从当前 selection 向上找最近的 h2 兜底，确保样式落在正确元素。 */
+function applyBlueTitle(){
+  const body = document.getElementById("aeBody");
+  document.execCommand("formatBlock", false, "h2");
+  let node = window.getSelection() && window.getSelection().anchorNode;
+  if(node && node.nodeType === 3) node = node.parentNode;
+  let h2 = node && node.closest ? node.closest("h2") : null;
+  if(!h2 || !body.contains(h2)){
+    // 兜底：取光标所在顶层块，或正文最后一个 h2
+    const blocks = Array.from(body.querySelectorAll("h2"));
+    h2 = blocks[blocks.length - 1] || null;
+  }
+  if(!h2) return;
+  h2.setAttribute("style",
+    "color:#4a90e2;font-weight:bold;border-top:3px solid #576b95;"
+    + "border-bottom:3px solid #576b95;border-left:5px solid #576b95;padding:6px 10px");
+}
+
+/* 前端清洗兜底：粘进来的脏 HTML 立即规范化（服务端仍会再清洗一次为安全底线）。
+   这里只做关键项：剥 script/style/iframe/事件属性、禁 javascript: href、外链图改占位。 */
+function _cleanEditorPaste(){
+  const body = document.getElementById("aeBody");
+  body.querySelectorAll("script,style,iframe,object,embed,svg,form").forEach(n=>n.remove());
+  body.querySelectorAll("*").forEach(n=>{
+    Array.from(n.attributes||[]).forEach(a=>{
+      if(a.name.toLowerCase().startsWith("on") || a.name.toLowerCase()==="srcset") n.removeAttribute(a.name);
+    });
+    if(n.tagName === "A"){
+      const h = n.getAttribute("href") || "";
+      if(h && !/^(https?:\/\/|mailto:|#|\/)/i.test(h)) n.removeAttribute("href");
+    }
+    if(n.tagName === "IMG"){
+      const s = n.getAttribute("src") || "";
+      if(s && !/^(\/api\/image\/|data:image\/)/i.test(s)) n.replaceWith(Object.assign(document.createElement("span"),{textContent:"[外链图已拦截]"}));
+    }
+  });
+}
+// 粘贴后异步清洗（execCommand 后 DOM 已更新）
+setTimeout(()=>{
+  const body = document.getElementById("aeBody");
+  if(body) body.addEventListener("paste", ()=>setTimeout(_cleanEditorPaste, 0));
+}, 0);
+
+function openImagePicker(){ _imgPickFor = "editor"; openImageLibrary(); }
+function openImageLibrary(){ loadImageLibrary(); document.getElementById("imageLibMask").classList.remove("hidden"); }
+function closeImageLibrary(){ document.getElementById("imageLibMask").classList.add("hidden"); }
+
+let _imgTrashView = false;
+function toggleImageTrashView(){ _imgTrashView = !_imgTrashView; loadImageLibrary(); }
+
+async function loadImageLibrary(){
+  const grid = document.getElementById("imgGrid");
+  const msg = document.getElementById("imgLibMsg");
+  const insBtn = document.getElementById("btnInsertImgs");
+  const trBtn = document.getElementById("btnTrashImgs");
+  const hint = document.getElementById("imgLibHint");
+  const toggleBtn = document.getElementById("btnToggleImgTrash");
+  const inEditor = _imgPickFor === "editor";
+  if(insBtn) insBtn.classList.toggle("hidden", !inEditor || _imgTrashView);
+  if(trBtn) trBtn.classList.toggle("hidden", _imgTrashView);
+  const rstBtn = document.getElementById("btnRestoreImgs");
+  const prgBtn = document.getElementById("btnPurgeImgs");
+  if(rstBtn) rstBtn.classList.toggle("hidden", !_imgTrashView);
+  if(prgBtn) prgBtn.classList.toggle("hidden", !_imgTrashView);
+  if(toggleBtn) toggleBtn.textContent = _imgTrashView ? "↩ 返回图片库" : "🗑 回收站";
+  if(hint) hint.textContent = _imgTrashView ? "回收站里的图可恢复，或永久删除（不可恢复）"
+    : "正在使用的图不可移入回收站（避免文章破图）";
+  msg.textContent = "加载中…";
+  try{
+    const r = await fetch("/api/image/list");
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const j = await r.json();
+    _aeImages = j.items || [];
+    const shown = _aeImages.filter(x=>!!x.trashed === _imgTrashView);
+    if(!shown.length){
+      grid.innerHTML = `<div class="muted">${_imgTrashView ? "回收站是空的。" : "还没有图片。上传后即可在文章里引用；未使用的图可移入回收站。"}</div>`;
+      msg.textContent = ""; return;
+    }
+    grid.innerHTML = shown.map(x=>`
+      <div class="img-cell">
+        <input type="checkbox" class="img-pick" value="${esc(x.id)}">
+        <img src="${esc(x.url)}" alt="${esc(x.name)}" loading="lazy">
+        <div class="imeta">
+          <span title="${esc(x.name)}">${esc(x.name)}</span>
+          ${_imgTrashView ? '<span class="unused-tag">回收站</span>'
+            : `<span class="${x.used?'used-tag':'unused-tag'}">${x.used?'使用中':'未使用'}</span>`}
+        </div>
+      </div>`).join("");
+    msg.textContent = _imgTrashView
+      ? `回收站 ${shown.length} 张`
+      : `共 ${shown.length} 张` + (j.used_count ? `（${j.used_count} 张在用）` : "");
+  }catch(e){ grid.innerHTML=''; msg.textContent="加载失败："+e.message; }
+}
+
+async function uploadImages(){
+  const input = document.getElementById("imgUploadInput");
+  if(!input.files.length){ alert("请先选择图片"); return; }
+  const fd = new FormData();
+  for(const f of input.files) fd.append("files", f);
+  const msg = document.getElementById("imgLibMsg");
+  msg.textContent = "上传中…";
+  try{
+    const r = await fetch("/api/image/upload", {method:"POST", body:fd});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.detail || r.status);
+    input.value = "";
+    await loadImageLibrary();
+    msg.textContent = `已上传 ${j.items.length} 张` + (j.items.some(x=>x.dedup) ? "（含重复内容，已去重）" : "");
+  }catch(e){ msg.textContent = "上传失败："+e.message; }
+}
+
+function _pickedImageIds(){ return Array.from(document.querySelectorAll(".img-pick:checked")).map(el=>el.value); }
+
+// 从图片库选图插入正文（复用已上传资产）
+function insertPickedImages(){
+  const ids = _pickedImageIds();
+  if(!ids.length){ alert("请先勾选要插入的图片"); return; }
+  const body = document.getElementById("aeBody");
+  body.focus();
+  ids.forEach(id=>{
+    document.execCommand("insertHTML", false, `<img src="/api/image/${id}" alt="图片">`);
+  });
+  closeImageLibrary();
+}
+
+async function trashSelectedImages(){
+  const ids = _pickedImageIds();
+  if(!ids.length){ alert("请先勾选要清理的图片"); return; }
+  const r = await fetch("/api/image/trash", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ids})});
+  const j = await r.json();
+  let msg = `已移入回收站 ${j.trashed.length} 张`;
+  if(j.rejected.length) msg += `；${j.rejected.length} 张仍在用，已跳过`;
+  document.getElementById("imgLibMsg").textContent = msg;
+  await loadImageLibrary();
+}
+
+async function restoreSelectedImages(){
+  const ids = _pickedImageIds();
+  if(!ids.length){ alert("请先勾选要恢复的图片"); return; }
+  const r = await fetch("/api/image/restore", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ids})});
+  const j = await r.json();
+  document.getElementById("imgLibMsg").textContent = `已恢复 ${j.restored.length} 张`;
+  await loadImageLibrary();
+}
+async function purgeSelectedImages(){
+  const ids = _pickedImageIds();
+  if(!ids.length){ alert("请先勾选要删除的图片"); return; }
+  if(!confirm(`永久删除选中的 ${ids.length} 张图片？此操作不可恢复。`)) return;
+  const r = await fetch("/api/image/purge", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ids})});
+  const j = await r.json();
+  let msg = `已永久删除 ${j.purged.length} 张`;
+  if(j.skipped.length) msg += `；${j.skipped.length} 张跳过（仍被引用或不在回收站）`;
+  document.getElementById("imgLibMsg").textContent = msg;
+  await loadImageLibrary();
+}
+
+async function saveArtEditor(){
+  const title = document.getElementById("aeTitle").value.trim();
+  const body = document.getElementById("aeBody");
+  const msg = document.getElementById("aeMsg");
+  if(!title){ alert("请填写标题"); return; }
+  const html = body.innerHTML.trim();
+  if(!html || html === "<br>"){ alert("正文不能为空"); return; }
+  try{
+    // 派生模式：先把正文里的 data URI 图片上传成用户资产（归一），src 换成 /api/image/<id>
+    if(_aeDerive){
+      msg.textContent = "正在归一图片…";
+      await _normalizeEditorImages();
+    }
+  }catch(e){
+    // 归一失败不阻断保存：data URI 仍在正文里，服务端清洗器放行，只是不算独立资产
+    console.warn("图片归一失败，保留内联数据：", e);
+  }
+  msg.textContent = "保存中…";
+  const payload = {
+    title, html: body.innerHTML.trim(),
+    published_at: document.getElementById("aeDate").value,
+    content_type: document.getElementById("aeType").value.trim(),
+    url: document.getElementById("aeUrl").value.trim(),
+    cid: document.getElementById("aeColl").value || "default",
+    // 派生模式清 rid → article_save 按内容派生新 rid，原文快照不动；本地模式复用 rid 覆盖
+    rid: _aeDerive ? "" : _aeEditingRid,
+  };
+  try{
+    const r = await fetch("/api/article/save", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(payload)});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.detail || r.status);
+    msg.textContent = _aeDerive ? "已保存为你的副本（原文未改动）" : "已保存";
+    const wasDerive = _aeDerive;
+    setTimeout(()=>{ closeArtEditor(); _aeDerive = false; loadLibrary(); if(wasDerive) alert("已派生为新图文，原归档文章保持不变。"); }, 500);
+  }catch(e){ msg.textContent = "保存失败："+e.message; }
 }
 
 /* ==================== A：定向补录（按 rid 直接绑定，不走文件名匹配） ==================== */
@@ -3303,6 +3947,7 @@ async function toggleAcceptShare(){
    媒体库卡片默认「新标签打开」走这里；卡片上另留「▢ 弹窗预览」走原弹窗。
    视频在左、合集播放列表在右；AI 文章与字幕原文上下堆叠，各自独立滚动条（46vh，同分享页）。 */
 let _ppItems = [], _ppCollId = "", _ppIdx = 0;
+let _ppKind = "all";   // 播放页的类型筛选，来自 URL ?kind=，与媒体库 tab 保持一致
 let _ppProgBound = false;
 
 function _playFromQuery(){
@@ -3316,6 +3961,7 @@ async function initPlayMode(){
   const msg = document.getElementById("plpMsg");
   const q = new URLSearchParams(location.search);
   _ppCollId = q.get("coll") || "default";
+  _ppKind = (q.get("kind") === "video" || q.get("kind") === "article") ? q.get("kind") : "all";
   _ppIdx = parseInt(q.get("i") || "0", 10) || 0;
   msg.textContent = "加载中…";
   try{
@@ -3328,7 +3974,9 @@ async function initPlayMode(){
   let coll = cols.find(c => c.id === _ppCollId) || null;
   if(!coll){ coll = cols[0]; _ppIdx = 0; }
   _ppCollId = coll.id;
-  _ppItems = coll.items || [];
+  // 用与媒体库 tab 相同的规则过滤；此时 i 已是筛选后下标，直接对齐
+  _ppItems = (_ppKind === "all") ? (coll.items || [])
+    : (coll.items || []).filter(it => _isArticle(it) === (_ppKind === "article"));
   await loadArticleIndex();
   renderPlayPageList(_ppItems.length ? _ppIdx : 0);
   if(!_ppItems.length){ msg.textContent = "该合集还没有视频。"; return; }
@@ -3358,18 +4006,50 @@ function goPlayPageItem(i){
   _ppIdx = i;
   renderPlayPageList(i);
   showPlayPageItem(i);
-  try{ history.replaceState(null, "", "/?play=1&coll=" + encodeURIComponent(_ppCollId) + "&i=" + i); }catch(e){}
+  try{ history.replaceState(null, "", "/?play=1&coll=" + encodeURIComponent(_ppCollId) + "&i=" + i + "&kind=" + encodeURIComponent(_ppKind)); }catch(e){}
 }
 
-function showPlayPageItem(i){
+async function showPlayPageItem(i){
   const it = _ppItems[i];
   if(!it) return;
   const mediaUrl = it.shared ? _shareUrl(it) : ("/api/files/" + encodeURI(it.rel_path));
   const v = document.getElementById("plpVideo");
+  const frame = document.getElementById("plpArticle");
   v.pause();
+  document.getElementById("plpTitle").textContent = it.title || it.rel_path;
+  // 文章：与视频互斥，隐藏视频导出按钮，异步装正文
+  if(_isArticle(it)){
+    v.removeAttribute("src"); v.load(); v.classList.add("hidden");
+    frame.classList.remove("hidden");
+    ["plpDlVideo","plpDlSub","plpDlSubSrt","plpDlCover","plpAttach"].forEach(id=>{
+      const el = document.getElementById(id); if(el) el.classList.add("hidden");
+    });
+    document.getElementById("plpFullBtn").classList.remove("hidden");
+    // 编辑入口：自己的图文可编辑（归档派生副本 / 本地原地改）；共享只读不显示
+    document.getElementById("plpEditArt").classList.toggle("hidden", !!it.shared);
+    const am = document.getElementById("plpMeta");
+    am.innerHTML = `<span>公众号文章</span>`
+      + (it.content_type ? `<span>${esc(it.content_type)}</span>` : "")
+      + (it.published_at ? `<span>${esc(it.published_at)}</span>` : "")
+      + (it.shared ? `<span>由 ${esc(it.share_owner||"对方")} 共享 · 只读</span>` : "")
+      + _sourceUrlHtml(it.url);
+    document.title = (it.title || "文章") + " - 媒体资源库";
+    const pe = document.getElementById("plpExtras"); if(pe) pe.innerHTML = "";
+    document.getElementById("plpMsg").textContent = "加载正文…";
+    await _loadArticleIntoFrame(it, frame);
+    document.getElementById("plpMsg").textContent = "";
+    return;
+  }
+  if(document.fullscreenElement === frame){ try{ document.exitFullscreen(); }catch(e){} }
+  frame.classList.add("hidden"); frame.removeAttribute("src"); frame.removeAttribute("srcdoc");
+  document.getElementById("plpFullBtn").classList.add("hidden");
+  document.getElementById("plpEditArt").classList.add("hidden");
+  v.classList.remove("hidden");
+  ["plpDlVideo","plpAttach"].forEach(id=>{
+    const el = document.getElementById(id); if(el) el.classList.remove("hidden");
+  });
   v.src = mediaUrl;
   v.load();
-  document.getElementById("plpTitle").textContent = it.title || it.rel_path;
   const meta = [];
   if(it.duration) meta.push("时长 " + fmtDur(it.duration));
   if(it.shared) meta.push("由 " + (it.share_owner || "对方") + " 共享 · 只读");

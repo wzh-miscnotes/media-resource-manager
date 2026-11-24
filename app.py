@@ -46,6 +46,7 @@ import ipaddress
 
 from collections import OrderedDict
 from contextlib import contextmanager
+from html.parser import HTMLParser
 
 from fastapi import Depends, FastAPI, HTTPException, Header, Request, UploadFile, File, Form
 
@@ -1263,6 +1264,18 @@ def _article_rel_for_subtitle(owner, subtitle_rel):
                 return os.path.relpath(p, DOWNLOADS).replace("\\", "/")
     return None
 
+def _file_response_or_inline(path, inline_html=False):
+    """文件响应：.html 正文内联渲染（iframe 阅读器需要），其它文件保持下载语义。
+
+    背景（2026-11-23）：FileResponse(filename=...) 会带 Content-Disposition: attachment，
+    文章正文 html 被浏览器当下载 → iframe 空白（视频用 <video> 不受影响，故此前未暴露）。
+    仅对 .html 去掉 filename；视频/字幕/图片等下载行为完全不变。
+    """
+    if inline_html and path.lower().endswith(".html"):
+        return FileResponse(path, media_type="text/html; charset=utf-8")
+    return FileResponse(path, filename=os.path.basename(path))
+
+
 @app.get("/api/files/{name:path}")
 def serve_file(name: str, share: str = None, sid: str = Depends(current_identity)):
     name = name.replace(os.sep, "/")
@@ -1288,7 +1301,7 @@ def serve_file(name: str, share: str = None, sid: str = Depends(current_identity
             path = os.path.abspath(os.path.join(DOWNLOADS, name))
             if not path.startswith(os.path.abspath(DOWNLOADS)) or not os.path.isfile(path):
                 raise HTTPException(404, "文件不存在")
-            return FileResponse(path, filename=os.path.basename(path))
+            return _file_response_or_inline(path, inline_html=True)  # 共享文章正文需内联渲染
         raise HTTPException(404, "文件不存在")
     # ---- 资源池文件：引用校验（请求者合集中须含该 resource_id）后放行 ----
     if name.startswith("resources/"):
@@ -1307,7 +1320,7 @@ def serve_file(name: str, share: str = None, sid: str = Depends(current_identity
             if _ok:
                 _pp = os.path.abspath(os.path.join(DOWNLOADS, name))
                 if _pp.startswith(os.path.abspath(DOWNLOADS)) and os.path.isfile(_pp):
-                    return FileResponse(_pp, filename=os.path.basename(name))
+                    return _file_response_or_inline(_pp, inline_html=True)  # 文章正文内联渲染
         raise HTTPException(404, "文件不存在")
 
     # ---- 普通访问：仅本人 users/{hash}/ 目录（默认拒绝）----
@@ -1619,6 +1632,9 @@ def _shared_with_me_collection(identity):
             "media_type": src.get("media_type", ""),
             "url": src.get("url", ""),
             "images": list(src.get("images") or []),
+            # 发布日期 / 内容子类型回显（2026-11-23）：接收方卡片显示/筛选的数据源。
+            "published_at": src.get("published_at", ""),
+            "content_type": src.get("content_type", ""),
             # 共享扩展字段
             "shared": True,
             "share_token": token,
@@ -1946,6 +1962,9 @@ def share_info(token: str, sid: str = Depends(current_identity)):
         "subtitle_srt": ((item or {}).get("subtitle_srt") or _subtitle_srt_rel((item or {}).get("subtitle", ""))),
         "subtitle_source": (item or {}).get("subtitle_source", ""),
         "cover": (item or {}).get("cover", ""),
+        # 发布日期 / 内容子类型（2026-11-23）：分享页元数据也回显，供被共享方卡片显示/筛选。
+        "published_at": (item or {}).get("published_at", ""),
+        "content_type": (item or {}).get("content_type", ""),
         "article_rel": article_rel,
         "article_filename": article_filename,
         "article_bold": (_article_bold_for(
@@ -2502,6 +2521,351 @@ async def upload_files(
     skipped = len(files) - added - attached - pending - consumed
     return {"ok": True, "added": added, "attached": attached,
             "pending": pending, "skipped": max(skipped, 0), "total": len(files)}
+
+
+# ==================== 图文生产闭环：图片资产（用户隔离）====================
+# 开源部署无采集端 → 图文靠前端写入；图片作为独立资产，用户隔离、按需引用、
+# 未使用者由用户手动移入回收站。设计见 wechat-archive/docs/公众号图文富样式-治本方案.md §8。
+IMAGE_RE = re.compile(r"/api/image/([A-Za-z0-9_-]+)")   # 文章正文里的图片引用
+
+def _image_root(sid):
+    return os.path.join(user_root(sid), "images")
+
+def _image_index_path(sid):
+    return os.path.join(_image_root(sid), "index.json")
+
+def _load_image_index(sid):
+    p = _image_index_path(sid)
+    try:
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+def _save_image_index(sid, data):
+    root = _image_root(sid)
+    os.makedirs(root, exist_ok=True)
+    p = _image_index_path(sid)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+
+def _article_used_image_ids(sid):
+    """扫描【本人】文章正文，返回本人文章引用的图片 id 集合。
+    引用天然按 owner：编辑器只插本人上传的图（/api/image/<id> 无 share），
+    共享文章的图只读、不写回自己的文章。故 used 判定必须按人隔离，
+    否则两个用户上传同内容图（内容哈希 → 同 id）会互相卡住删除。
+    按需全量重算（单用户图片/文章量级小），不做增量引用表以避免双写一致性。"""
+    used = set()
+    data = _load_collections()
+    mine = data.get(sid, {})
+    for c in mine.get("collections", []):
+        for it in c.get("items", []):
+            if it.get("media_type") != "article" and it.get("source_type") != "wechat_article":
+                continue
+            rel = (it.get("rel_path") or "").replace("\\", "/")
+            if not rel:
+                continue
+            ap = os.path.join(DOWNLOADS, rel)
+            if not os.path.isfile(ap):
+                continue
+            try:
+                with open(ap, encoding="utf-8", errors="ignore") as f:
+                    used.update(IMAGE_RE.findall(f.read()))
+            except Exception:
+                pass
+    return used
+
+@app.post("/api/image/upload")
+async def image_upload(files: list[UploadFile] = File(...), sid: str = Depends(current_identity)):
+    """上传图片到本人隔离区 users/<hash>/images/，按内容哈希 id 去重。
+    返回 [{id, url, name, size, dedup}]；前端拿到 url 写进富文本 <img src>。"""
+    root = _image_root(sid)
+    os.makedirs(root, exist_ok=True)
+    idx = _load_image_index(sid)
+    out = []
+    for f in files:
+        ext = os.path.splitext(f.filename or "")[1].lower()
+        if ext not in IMG_EXTS:
+            continue
+        try:
+            data = await f.read()
+        except Exception:
+            continue
+        h = hashlib.sha256(data).hexdigest()
+        iid = "i" + h[:15]                      # 用户内内容去重
+        dest = os.path.join(root, iid + ext)
+        dedup = iid in idx and os.path.isfile(dest)
+        if not dedup:
+            # 同一哈希不同扩展名共存时保留首次；清理旧形式避免残留
+            with open(dest, "wb") as w:
+                w.write(data)
+            idx[iid] = {"ext": ext, "name": _safe_upload_name(f.filename or (iid + ext)),
+                        "size": len(data), "added_at": int(time.time()), "trashed": False}
+        out.append({"id": iid, "url": "/api/image/" + iid,
+                    "name": idx[iid]["name"], "size": idx[iid]["size"], "dedup": dedup})
+    _save_image_index(sid, idx)
+    return {"ok": True, "items": out}
+
+@app.get("/api/image/list")
+def image_list(sid: str = Depends(current_identity)):
+    """列出本人图片，带 used 标记（是否仍被【本人】文章引用）与 trashed 状态。"""
+    idx = _load_image_index(sid)
+    used = _article_used_image_ids(sid)
+    items = []
+    for iid, m in idx.items():
+        items.append({"id": iid, "url": "/api/image/" + iid,
+                      "name": m.get("name", iid), "size": m.get("size", 0),
+                      "added_at": m.get("added_at", 0),
+                      "ext": m.get("ext", ""),
+                      "used": iid in used, "trashed": bool(m.get("trashed"))})
+    items.sort(key=lambda x: x.get("added_at", 0), reverse=True)
+    return {"ok": True, "items": items, "used_count": sum(1 for i in items if i["used"])}
+
+@app.get("/api/image/{iid}")
+def image_get(iid: str, share: str = None, sid: str = Depends(current_identity)):
+    """取图：本人隔离；共享视图带 ?share=token 时按令牌 owner 放行。"""
+    owner = sid
+    if share:
+        tok = _resolve_share(share)
+        if not tok:
+            raise HTTPException(404, "分享链接无效或已失效")
+        owner = tok.get("owner") or sid
+    idx = _load_image_index(owner)
+    m = idx.get(iid)
+    if not m:
+        raise HTTPException(404, "图片不存在或无权访问")
+    ext = m.get("ext", "")
+    p = os.path.abspath(os.path.join(_image_root(owner), iid + ext))
+    root = os.path.abspath(_image_root(owner))
+    if not p.startswith(root + os.sep) or not os.path.isfile(p):
+        raise HTTPException(404, "图片文件不存在")
+    mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+            ".webp": "image/webp", ".gif": "image/gif"}.get(ext, "image/png")
+    return FileResponse(p, media_type=mime)
+
+class ImageTrashReq(BaseModel):
+    ids: list[str] = []
+
+@app.post("/api/image/trash")
+def image_trash(req: ImageTrashReq, sid: str = Depends(current_identity)):
+    """手动把未使用图片移入回收站（逻辑标记 trashed，不删物理文件）。
+    在用图片一律拒绝，避免文章破图。"""
+    idx = _load_image_index(sid)
+    used = _article_used_image_ids(sid)
+    trashed, rejected = [], []
+    for iid in req.ids:
+        if iid not in idx:
+            continue
+        if iid in used:
+            rejected.append({"id": iid, "name": idx[iid].get("name", iid), "reason": "仍被文章引用"})
+            continue
+        idx[iid]["trashed"] = True
+        idx[iid]["trashed_at"] = int(time.time())
+        trashed.append({"id": iid, "name": idx[iid].get("name", iid)})
+    _save_image_index(sid, idx)
+    return {"ok": True, "trashed": trashed, "rejected": rejected}
+
+@app.post("/api/image/restore")
+def image_restore(req: ImageTrashReq, sid: str = Depends(current_identity)):
+    idx = _load_image_index(sid)
+    restored = []
+    for iid in req.ids:
+        if iid in idx and idx[iid].get("trashed"):
+            idx[iid]["trashed"] = False
+            idx[iid].pop("trashed_at", None)
+            restored.append(iid)
+    _save_image_index(sid, idx)
+    return {"ok": True, "restored": restored}
+
+@app.post("/api/image/purge")
+def image_purge(req: ImageTrashReq, sid: str = Depends(current_identity)):
+    """永久删除：仅删「已进回收站且无引用」的图片；在用图即使标记 trashed 也拒绝。"""
+    idx = _load_image_index(sid)
+    used = _article_used_image_ids(sid)
+    root = os.path.abspath(_image_root(sid))
+    purged, skipped = [], []
+    for iid in req.ids:
+        m = idx.get(iid)
+        if not m or not m.get("trashed"):
+            skipped.append({"id": iid, "reason": "未在回收站中"})
+            continue
+        if iid in used:
+            skipped.append({"id": iid, "reason": "仍被文章引用"})
+            continue
+        ext = m.get("ext", "")
+        p = os.path.abspath(os.path.join(root, iid + ext))
+        if p.startswith(root + os.sep) and os.path.isfile(p):
+            os.remove(p)
+        idx.pop(iid, None)
+        purged.append(iid)
+    _save_image_index(sid, idx)
+    return {"ok": True, "purged": purged, "skipped": skipped}
+
+
+# ---------- 富文本文章保存：服务端白名单清洗 + 入池 ----------
+# 前端也会清洗一次，但前端可被绕过 → 服务端是安全底线。
+_ART_ALLOWED_TAGS = {
+    "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "b", "em", "i",
+    "u", "s", "ul", "ol", "li", "blockquote", "pre", "code", "hr", "section",
+    "div", "span", "a", "img", "table", "thead", "tbody", "tr", "td", "th", "figure", "figcaption",
+}
+_ART_ALLOWED_ATTRS = {
+    "a": {"href", "title"},
+    "img": {"src", "alt", "width", "height"},
+    "td": {"colspan", "rowspan"}, "th": {"colspan", "rowspan"},
+}
+_ART_CSS_SAFE = (
+    "color", "background-color", "font-size", "font-weight", "font-style", "text-align",
+    "text-indent", "line-height", "letter-spacing", "margin", "margin-top", "margin-bottom",
+    "margin-left", "margin-right", "padding", "padding-top", "padding-bottom", "padding-left",
+    "padding-right", "border", "border-top", "border-right", "border-bottom", "border-left",
+    "border-color", "border-width", "border-style", "border-radius", "max-width", "width",
+)
+_ART_CSS_DANGEROUS = ("url(", "expression(", "behavior", "@import", "var(", "!important", "<", ">", "{", "}")
+
+def _clean_art_style(val):
+    """CSS 白名单：按属性名字母序确定性输出，危险值整条丢弃。"""
+    out = []
+    for decl in (val or "").split(";"):
+        if ":" not in decl:
+            continue
+        prop, v = decl.split(":", 1)
+        prop, v = prop.strip().lower(), v.strip()
+        if prop not in _ART_CSS_SAFE or len(v) > 200:
+            continue
+        if any(d in v.lower() for d in _ART_CSS_DANGEROUS):
+            continue
+        if prop == "display" and v == "none":
+            continue
+        out.append((prop, v))
+    return ";".join(p + ":" + v for p, v in sorted(out))
+
+class _ArtSanitizer(HTMLParser):
+    """白名单重建：只保留安全标签/属性；script/iframe/style 标签及事件属性一律丢弃。"""
+    VOID = {"br", "hr", "img"}
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self._skip_depth = 0
+        self._skip_tags = {"script", "style", "iframe", "object", "embed", "svg", "form", "input", "textarea"}
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if self._skip_depth:
+            if tag in self._skip_tags:
+                self._skip_depth += 1
+            return
+        if tag in self._skip_tags:
+            self._skip_depth = 1
+            return
+        if tag not in _ART_ALLOWED_TAGS:
+            return
+        safe = {}
+        for k, v in attrs:
+            k = (k or "").lower()
+            v = v or ""
+            if k.startswith("on") or k == "srcset":     # 事件属性 / srcset 一律丢
+                continue
+            if k == "style":                             # 所有允许标签都接受清洗后的 style
+                pass
+            elif tag not in _ART_ALLOWED_ATTRS or k not in _ART_ALLOWED_ATTRS[tag]:
+                continue
+            if k == "href" and not re.match(r"^(https?://|mailto:|#|/)", v, re.I):
+                continue
+            if k == "src":
+                # 只放行本人图片引用 / data 图 / 相对文件名；禁外链 http（防盗链/追踪）与 javascript
+                if not re.match(r"^(/api/image/[A-Za-z0-9_-]+|data:image/|[\w.\-/]+\.(png|jpe?g|gif|webp))$", v, re.I):
+                    continue
+            if k == "style":
+                v = _clean_art_style(v)
+                if not v:
+                    continue
+            safe[k] = v
+        attr_s = "".join(f' {k}="{html_escape(v, quote=True)}"' for k, v in safe.items())
+        self.parts.append(f"<{tag}{attr_s}>")   # VOID 标签不输出闭合；由 handle_endtag 统一跳过
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag.lower() not in self.VOID:
+            self.handle_endtag(tag)
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if self._skip_depth:
+            if tag in self._skip_tags:
+                self._skip_depth = max(0, self._skip_depth - 1)
+            return
+        if tag in self.VOID or tag not in _ART_ALLOWED_TAGS:
+            return
+        self.parts.append(f"</{tag}>")
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self.parts.append(html_escape(data, quote=False))
+    def cleaned(self):
+        return "".join(self.parts)
+
+def html_escape(s, quote=False):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;" if quote else '"').replace("'", "&#x27;" if quote else "'"))
+
+_ART_DOC_HEAD = ('<!doctype html><html><head><meta charset="utf-8"><title>'
+                 + '图文</title><style>')
+_ART_DOC_CSS = (
+    'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:16px;'
+    'line-height:1.8;color:#222;max-width:760px;margin:0 auto;padding:24px;word-break:break-word}'
+    'h1{font-size:26px}h2{font-size:22px;margin:24px 0 12px}h3{font-size:19px}'
+    'blockquote{border-left:4px solid #4a90e2;padding:8px 16px;margin:16px 0;background:#f7f9fc;color:#555}'
+    'pre{background:#f6f6f6;padding:14px;border-radius:6px;overflow-x:auto;line-height:1.6}'
+    'code{background:#eef1f6;padding:1px 5px;border-radius:4px;font-size:14px}'
+    'pre code{background:none;padding:0}'
+    'a{color:#576b95;text-decoration:none}'
+    'img{max-width:100%;height:auto;display:block;margin:16px auto;border-radius:4px}'
+    'table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px}'
+)
+_ART_DOC_TAIL_MID = '</style></head><body>'
+
+def _build_article_html(title, body_html, author="", published_at=""):
+    s = _ArtSanitizer()
+    s.feed(body_html or "")
+    clean = s.cleaned()
+    meta = ""
+    if author or published_at:
+        meta = "<p><small>" + html_escape(" · ".join(x for x in (author, published_at) if x)) + "</small></p>"
+    return (_ART_DOC_HEAD + _ART_DOC_CSS + _ART_DOC_TAIL_MID
+            + "<h1>" + html_escape(title or "未命名图文") + "</h1>" + meta + clean
+            + "</body></html>")
+
+class ArticleSaveReq(BaseModel):
+    title: str = ""
+    html: str = ""
+    published_at: str = ""
+    content_type: str = ""
+    url: str = ""
+    cid: str = "default"
+    rid: str = ""          # 编辑已有文章时传原 rid；新建留空由内容派生
+
+@app.post("/api/article/save")
+def article_save(req: ArticleSaveReq, sid: str = Depends(current_identity)):
+    """保存富文本图文：服务端清洗 → 生成完整 HTML → 复用 _ingest_into_pool 的
+    wechat_article 分支入池（与采集图文同构，卡片/阅读器/共享/回收站全继承）。
+    rid 传入则复用（编辑场景，旧版本自动进回收站）；否则按内容派生（新建）。"""
+    title = (req.title or "").strip() or "未命名图文"
+    doc = _build_article_html(title, req.html, published_at=req.published_at)
+    raw = doc.encode("utf-8")
+    h = hashlib.sha256(raw).hexdigest()
+    rid = (req.rid or "").strip() or ("r" + h[:15])
+    body_key8 = _body_key8_from_hash(h)
+    stage_dir = os.path.join(user_root(sid), "_staging")
+    os.makedirs(stage_dir, exist_ok=True)
+    staged = _uniq_path(os.path.join(stage_dir, "article_" + h[:10] + ".html"))
+    with open(staged, "wb") as w:
+        w.write(raw)
+    out_rid, dedup, rel, replaced = _ingest_into_pool(
+        sid, rid, body_key8, staged, [], title, target_cid=req.cid,
+        content_sha256=h, source_type="wechat_article", url=req.url,
+        published_at=req.published_at, content_type=req.content_type)
+    return {"ok": True, "rid": out_rid, "rel_path": rel, "dedup": dedup,
+            "replaced_rel_path": replaced or ""}
 
 LLM_BASE_URL = str(cfg.get("llm_base_url") or "").rstrip("/")
 
@@ -4231,7 +4595,8 @@ def _recycle_unreferenced_body_dirs(rid, keep_body_key8):
 
 def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target_cid="default",
                       vid="", seq="", subtitle_source="", cover="", content_sha256="",
-                      target_name="", source_type="video", url=""):
+                      target_name="", source_type="video", url="",
+                      published_at="", content_type=""):
     """统一入池 + 登记合集引用（ingest / upload / import-dir / watcher 共用，见 RM-实施指引 §2）。
 
     去重（O3 治本，2026-10-20）：body_key8 已改为「文件内容哈希派生」，配合此处的内容级去重，
@@ -4298,6 +4663,10 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
     if source_type == "wechat_article":
         entry["images"] = [e for e in _extras if e.lower().endswith(IMG_EXTS)]
         entry["media_type"] = "article"   # .html 的 media_type_of 为 other，article 场景显式覆盖
+        # 发布日期 / 内容子类型（2026-11-23）：随 payload 落 entry，供卡片显示/筛选/排序。
+        # 仅文章分支写入，视频等其它资源零影响；空串表示未知，前端按缺失处理。
+        entry["published_at"] = published_at
+        entry["content_type"] = content_type
     # subtitle_source：显式传入优先；否则有字幕即记为 official，无则空。
     entry["subtitle_source"] = subtitle_source or ("official" if entry["subtitle"] else "")
     # 封面：显式传入优先；否则把池内封面复制进缩略图缓存、以缓存名回填
@@ -4691,6 +5060,8 @@ class IngestReq(BaseModel):
     target_cid: str = "default"
     source_type: str = "video"    # 资源大类（中性默认）；公众号图文生产者传 "wechat_article"
     url: str = ""                 # 文章永久直链（公众号归档场景）
+    published_at: str = ""        # 公众号发布日期 YYYY-MM-DD（2026-11-23；默认空串，老生产者不受影响）
+    content_type: str = ""        # 内容子类型 图文/贴图（2026-11-23；空串=未知，不猜映射）
 
 
 @app.post("/api/ingest")
@@ -4714,6 +5085,7 @@ def ingest(req: IngestReq, sid: str = Depends(current_identity)):
     rid, dedup_hit, rel, replaced = _ingest_into_pool(
         owner, req.rid, body_key8, req.staged_path, extras, req.title, req.target_cid,
         content_sha256=_h, source_type=req.source_type, url=req.url,
+        published_at=req.published_at, content_type=req.content_type,
     )
     # R3（2026-10-21）：返回被替换掉的旧版本 rel_path（换内容场景），无替换则为空串。
     return {"ok": True, "rid": rid, "resource_id": rid, "dedup_hit": dedup_hit,

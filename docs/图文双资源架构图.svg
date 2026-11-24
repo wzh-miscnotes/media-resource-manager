@@ -1,0 +1,48 @@
+<svg viewBox="0 0 680 500" width="100%" role="img" xmlns="http://www.w3.org/2000/svg" font-family="'Microsoft YaHei','PingFang SC',sans-serif">
+<title>RM 视频与图文双资源架构</title>
+<desc>视频与图文两类资源从各自入口进入，汇入统一入池路由，共用去重、引用、共享、回收基础设施，再分别由播放器和阅读器呈现。两条路径平行，仅共用底层设施，彼此不依赖。</desc>
+<rect x="60" y="45" width="240" height="60" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="180" y="68" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#0C447C">视频入口</text>
+<text x="180" y="88" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#185FA5">手动上传 / 目录导入</text>
+<rect x="380" y="45" width="240" height="60" rx="10" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="500" y="68" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#085041">图文入口</text>
+<text x="500" y="88" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0F6E56">编辑器创建 / 目录导入</text>
+<line x1="180" y1="105" x2="180" y2="122" stroke="#888780" stroke-width="1.5"/>
+<line x1="180" y1="122" x2="280" y2="122" stroke="#888780" stroke-width="1.5"/>
+<line x1="280" y1="122" x2="280" y2="130" stroke="#888780" stroke-width="1.5"/>
+<polygon points="274,130 286,130 280,140" fill="#888780"/>
+<line x1="500" y1="105" x2="500" y2="122" stroke="#888780" stroke-width="1.5"/>
+<line x1="500" y1="122" x2="400" y2="122" stroke="#888780" stroke-width="1.5"/>
+<line x1="400" y1="122" x2="400" y2="130" stroke="#888780" stroke-width="1.5"/>
+<polygon points="394,130 406,130 400,140" fill="#888780"/>
+<rect x="200" y="140" width="280" height="56" rx="10" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="340" y="162" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#2C2C2A">统一入池路由</text>
+<text x="340" y="182" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5F5E5A">_ingest_into_pool</text>
+<line x1="340" y1="196" x2="340" y2="215" stroke="#888780" stroke-width="1.5"/>
+<polygon points="334,215 346,215 340,225" fill="#888780"/>
+<rect x="60" y="225" width="560" height="112" rx="20" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="80" y="246" text-anchor="start" dominant-baseline="central" font-size="13" font-weight="500" fill="#2C2C2A">共用底层基础设施 · 实现层复用</text>
+<rect x="80" y="262" width="122" height="58" rx="8" fill="#FFFFFF" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="141" y="283" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="500" fill="#2C2C2A">去重</text>
+<text x="141" y="303" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5F5E5A">rid · body_key8</text>
+<rect x="212" y="262" width="122" height="58" rx="8" fill="#FFFFFF" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="273" y="283" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="500" fill="#2C2C2A">引用</text>
+<text x="273" y="303" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5F5E5A">resource_id 校验</text>
+<rect x="345" y="262" width="122" height="58" rx="8" fill="#FFFFFF" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="406" y="283" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="500" fill="#2C2C2A">共享</text>
+<text x="406" y="303" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5F5E5A">共享令牌只读</text>
+<rect x="477" y="262" width="122" height="58" rx="8" fill="#FFFFFF" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="538" y="283" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="500" fill="#2C2C2A">回收</text>
+<text x="538" y="303" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5F5E5A">双层回收站</text>
+<line x1="180" y1="337" x2="180" y2="360" stroke="#888780" stroke-width="1.5"/>
+<polygon points="174,360 186,360 180,370" fill="#888780"/>
+<line x1="500" y1="337" x2="500" y2="360" stroke="#888780" stroke-width="1.5"/>
+<polygon points="494,360 506,360 500,370" fill="#888780"/>
+<rect x="60" y="370" width="240" height="60" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="180" y="393" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#0C447C">视频 · 播放器</text>
+<text x="180" y="413" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#185FA5">字幕 / 封面为附属文件</text>
+<rect x="380" y="370" width="240" height="60" rx="10" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="500" y="393" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#085041">图文 · 阅读器</text>
+<text x="500" y="413" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#0F6E56">富样式 / 图片为独立资产</text>
+<text x="340" y="460" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#5F5E5A">两条路径平行，仅共用底层设施，彼此不依赖</text>
+</svg>
