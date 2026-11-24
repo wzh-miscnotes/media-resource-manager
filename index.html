@@ -200,15 +200,6 @@
   .img-cell .imeta{padding:6px 8px;font-size:11.5px;color:var(--sub);display:flex;justify-content:space-between;align-items:center;gap:4px}
   .img-cell input[type=checkbox]{position:absolute;top:6px;left:6px;z-index:2}
   .img-cell .used-tag{color:#2b6cb0;font-weight:600} .img-cell .unused-tag{color:#b09a2b}
-  /* 本文图片（未入库，来自归档文章正文） */
-  .body-img-sec{border:1px solid var(--line);border-radius:10px;padding:10px;background:#fbfcfe}
-  .body-img-sec .bis-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-  .body-img-sec .bis-title{font-size:12.5px;color:var(--sub)}
-  .body-img-sec .bis-title b{color:#2b6cb0;font-size:13.5px}
-  .body-img-sec .bis-grid{max-height:32vh}
-  .body-img-sec .bis-tip{font-size:11.5px;color:var(--sub);line-height:1.6;margin-top:8px}
-  .body-img-sec .img-cell{background:#fff}
-  .body-img-sec .img-cell .bis-save{margin:0 6px 7px;width:calc(100% - 12px)}
   /* 批量选择 */
   .lib-card{position:relative}
   .lib-card .pick{position:absolute;top:8px;left:8px;width:20px;height:20px;accent-color:var(--primary);
@@ -560,9 +551,10 @@
         <span class="spacer" data-page-node-id="iihDijng3N6hiBOR86m5Ry"></span>
         <select id="libMoveTarget" title="选择目标合集" data-page-node-id="IdYhLPYm4U2biuVBlLcIH6"></select>
         <button class="btn-ghost btn-sm" onclick="batchMove()" data-page-node-id="VmcwBrYbo99AxNkQrD5FF8">移动到</button>
-        <button class="btn-ghost btn-sm" onclick="batchGenArticles()" title="对选中的视频逐个生成文章（本地模型串行执行，已有文章的自动跳过）">✍️ 生成文章</button>
-        <button class="btn-ghost btn-sm" onclick="batchDeleteArticles()" title="删除选中视频关联的全部已生成文章（不影响视频与字幕文件）">🧹 删除文章</button>
-        <button class="btn-danger btn-sm" onclick="batchDelete()" data-page-node-id="m4nacfX3ROlcsDGCNegxuG">🗑 删除（含字幕）</button>
+        <button class="btn-ghost btn-sm" id="btnGenArticles" onclick="batchGenArticles()" title="对选中的视频逐个生成图文（本地模型串行执行，已有文章的自动跳过）">✍️ 生成图文</button>
+        <button class="btn-ghost btn-sm" id="btnDelArticles" onclick="batchDeleteArticles()" title="删除选中视频关联的已生成图文（不影响视频与字幕文件）">🧹 删除已生成</button>
+        <button class="btn-ghost btn-sm" id="btnArtImgImport" onclick="batchImportArticleImages()" title="把选中图文的正文图片与封面复制成你的图片资产（视频自动忽略；内容相同不会重复保存）">🖼️ 图片入库</button>
+        <button class="btn-danger btn-sm" id="btnDeleteSel" onclick="batchDelete()" title="视频：连同字幕与封面一起删除；图文：连同正文文件删除" data-page-node-id="m4nacfX3ROlcsDGCNegxuG">🗑 删除选中（含字幕）</button>
         <button class="btn-ghost btn-sm" onclick="clearSelection()" data-page-node-id="8iW1AB2TCA3PhegVgRtsla">取消选择</button>
       </div>
       <div class="lib-grid" id="libGrid" data-page-node-id="v1RM92yIrCcGFa5uiEcNtn"></div>
@@ -694,15 +686,6 @@
           <button class="btn-danger btn-sm hidden" id="btnPurgeImgs" onclick="purgeSelectedImages()">🗑 永久删除</button>
           <button class="btn-ghost btn-sm" id="btnToggleImgTrash" onclick="toggleImageTrashView()">🗑 回收站</button>
           <span class="muted" id="imgLibHint">正在使用的图不可移入回收站（避免文章破图）</span>
-        </div>
-        <!-- 本文图片：归档文章正文里的图随文章存放、不属于用户资产，此处可一键另存入库 -->
-        <div id="bodyImgSec" class="body-img-sec hidden">
-          <div class="bis-head">
-            <span class="bis-title">本文图片 <b id="bodyImgCount">0</b> 张 · 尚未入库</span>
-            <button class="btn-ghost btn-sm" onclick="saveAllBodyImages()">⬇ 全部另存为我的图片</button>
-          </div>
-          <div id="bodyImgGrid" class="img-grid bis-grid"></div>
-          <div class="bis-tip">这些图跟随文章存放，不算你的图片资产，也无法插入其它图文。另存后即成为你的图片，可在下方图库统一管理与复用。</div>
         </div>
         <div id="imgGrid" class="img-grid"></div>
         <div id="imgLibMsg" class="muted"></div>
@@ -1139,12 +1122,67 @@ function switchTab(kind){
   });
   document.getElementById("libraryView").classList.remove("hidden");
   closePlayer();                 // 切换类型视图时关闭播放器弹窗，避免残留
+  _applyKindUI();                // 先收敛工具条再拉数据，避免视频按钮在图文库里闪一帧
   loadLibrary();
 }
 /* 按当前 tab 过滤条目。_isArticle 双判兼容老数据/回收站快照（见上文）。 */
 function _filterByKind(items){
   if(_libKind === "all") return items;
   return (items||[]).filter(it => _isArticle(it) === (_libKind === "article"));
+}
+
+/* ===== 工具条按 tab 收敛（视频专用 / 图文专用互斥显隐，共用项始终保留） =====
+   用 .hidden 而不是 disabled：图文库里留一个「上传视频」入口，点了还会传视频文件，
+   留着只会误导；反之视频库里也不需要「新建图文」。
+   共用项（合集、移动到、全选、删除选中、我的共享…）与类型无关，两库都保留。 */
+const _VID_TOOLS = ["btnUpload", "btnImportDir", "btnPending", "btnGenArticles", "btnDelArticles"];
+const _ART_TOOLS = ["btnNewArticle", "btnArtImgImport"];
+function _applyKindUI(){
+  const isVid = _libKind === "video", isArt = _libKind === "article";
+  _VID_TOOLS.forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.classList.toggle("hidden", isArt);
+  });
+  _ART_TOOLS.forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.classList.toggle("hidden", isVid);
+  });
+}
+
+/* 统计选中项里视频/图文各几个。优先用条目上的 media_type（_isArticle 权威口径），
+   条目已不在当前列表时退回 .html 扩展名——与 batchDelete / batchImportArticleImages 同一判据。 */
+function _selKinds(){
+  const byRel = new Map();
+  (currentCollItems()||[]).forEach(it=>{ if(it.rel_path) byRel.set(it.rel_path, _isArticle(it)); });
+  let art = 0, vid = 0;
+  _sel.forEach(r=>{
+    const a = byRel.has(r) ? byRel.get(r) : /\.html?$/i.test(r || "");
+    if(a) art++; else vid++;
+  });
+  return {art, vid};
+}
+
+/* 「全部」tab 下视频与图文混在同一列表，专用按钮不隐藏（否则布局随勾选跳动），
+   改为按选中项类型置灰 + title 说明为什么点不了。 */
+function _refreshBatchBtns(){
+  const bar = document.getElementById("libBatch");
+  if(!bar || bar.classList.contains("hidden")) return;
+  const {art, vid} = _selKinds();
+  const mixed = _libKind === "all";
+  const gate = (id, ok, tip)=>{
+    const el = document.getElementById(id); if(!el) return;
+    if(el.dataset.origTip === undefined) el.dataset.origTip = el.title || "";
+    const off = mixed && !ok;
+    el.disabled = off;
+    el.style.opacity = off ? .45 : 1;
+    el.title = off ? tip : el.dataset.origTip;
+  };
+  gate("btnGenArticles", vid > 0, "选中的是图文，此操作只对视频生效");
+  gate("btnDelArticles", vid > 0, "选中的是图文，此操作只对视频生效");
+  gate("btnArtImgImport", art > 0, "选中的是视频，此操作只对图文生效");
+  // 「（含字幕）」对图文是噪音：纯图文选择时去掉，视频/混合时保留
+  const del = document.getElementById("btnDeleteSel");
+  if(del) del.textContent = (art > 0 && vid === 0) ? "🗑 删除选中" : "🗑 删除选中（含字幕）";
 }
 
 document.addEventListener("keydown", (e)=>{
@@ -1172,6 +1210,7 @@ async function loadLibrary(){
   }
   sel.innerHTML = opts;
   if(prev && [...sel.options].some(o=>o.value===prev)) sel.value = prev;
+  _applyKindUI();   // tab 未变但合集/共享状态可能变，统一在此收敛一次工具条
   renderLibGrid();
 }
 
@@ -1184,7 +1223,7 @@ async function renderLibGrid(){
   const items = _filterByKind(coll.items);   // 当前 tab 的类型筛选结果；卡片下标 i 以此为基准
   const grid = document.getElementById("libGrid");
   const empty = document.getElementById("libEmpty");
-  const kindLabel = _libKind === "video" ? "个视频" : (_libKind === "article" ? "篇文章" : "条资源");
+  const kindLabel = _libKind === "video" ? "个视频" : (_libKind === "article" ? "篇图文" : "条资源");
   document.getElementById("libCount").textContent = isTrash
     ? `回收站 ${coll.items.length} 个`
     : `共 ${items.length} ${kindLabel}`;
@@ -1525,6 +1564,7 @@ function updateBatchBar(){
   // 全选框状态
   const total = currentCollItems().length;
   if(selAll){ selAll.checked = (total>0 && n===total); selAll.indeterminate = (n>0 && n<total); }
+  _refreshBatchBtns();   // 专用按钮按选中项类型置灰（仅「全部」tab 需要）
 }
 async function batchMove(){
   const target = document.getElementById("libMoveTarget").value;
@@ -1539,6 +1579,75 @@ async function batchMove(){
   if(r.ok){ clearSelection(); loadLibrary(); }
   else { const e=await r.json().catch(()=>({})); alert("移动失败："+(e.detail||r.status)); }
 }
+/* 文章图片入库：把选中图文的正文图 + 封面复制成本人图片资产。
+   为什么在批量条而不是编辑器里：入库是条目级元数据操作，不涉及内容编辑，
+   放这里不用进「编辑（派生副本）」对话框，也没有任何写文章的副作用。
+   服务端接口按内容哈希去重 → 重复点、多篇含同一张图都不会多存；视频自动跳过
+   （沿用「生成文章」的惯例：动作自己过滤适用范围）。 */
+async function batchImportArticleImages(){
+  if(!_sel.size){ alert("请先在卡片左上角勾选要处理的内容"); return; }
+  const rels = [..._sel].filter(r=>/\.html?$/i.test(r||""));
+  const otherCount = _sel.size - rels.length;
+  if(!rels.length){
+    alert("选中的都不是图文。\n\n图片入库只处理图文（视频不需要：它的封面/字幕是资源附属物，不是图片资产）。");
+    return;
+  }
+  const btn = document.getElementById("btnArtImgImport");
+  const oldTxt = btn ? btn.textContent : "";
+  if(btn){ btn.disabled = true; btn.textContent = "⏳ 入库中…"; }
+  try{
+    const r = await fetch("/api/article/images/import", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({rel_paths: rels})
+    });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.detail || ("HTTP " + r.status));
+    const rows = j.per_item || [];
+    const ok = rows.filter(x=>!x.reason);
+    const bad = rows.filter(x=>x.reason);
+    const lines = [];
+    if(j.total_added || j.total_dedup){
+      let head = `已入库 ${j.total_added} 张新图`;
+      if(j.total_dedup) head += `，${j.total_dedup} 张与库中内容相同未重复保存`;
+      if(j.total_restored) head += `（其中 ${j.total_restored} 张从回收站恢复）`;
+      lines.push(head + "：");
+      ok.forEach(x=>{
+        let s = `· ${x.title || x.rel_path}：共 ${x.found} 张（封面+正文）`;
+        const bits = [];
+        if(x.added) bits.push(`新增 ${x.added}`);
+        if(x.dedup) bits.push(`已存在 ${x.dedup}`);
+        if(x.already_asset) bits.push(`${x.already_asset} 张本来就是你的资产`);
+        if(bits.length) s += "，" + bits.join("，");
+        lines.push(s);
+      });
+    } else if(ok.length){
+      lines.push("没有新增图片：");
+      ok.forEach(x=>{
+        lines.push(`· ${x.title || x.rel_path}：没找到可入库的图`
+          + (x.already_asset ? `（${x.already_asset} 张本来就是你的资产）` : ""));
+      });
+    } else {
+      lines.push("没有可入库的图片。");
+    }
+    if(bad.length){
+      lines.push("");
+      lines.push(`跳过 ${bad.length} 条：`);
+      bad.forEach(x=>lines.push(`· ${x.title || x.rel_path}：${x.reason}`));
+    }
+    if(otherCount){
+      lines.push("");
+      lines.push(`（另有 ${otherCount} 个非图文条目已忽略）`);
+    }
+    alert(lines.join("\n"));
+    const mask = document.getElementById("imageLibMask");
+    if(mask && !mask.classList.contains("hidden")) loadImageLibrary();
+  }catch(e){
+    alert("图片入库失败：" + e.message);
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = oldTxt; }
+  }
+}
+
 async function batchDelete(){
   if(!_sel.size) return;
   const items = [...document.querySelectorAll(".lib-card .pick")].filter(el=>_sel.has(el.dataset.rel))
@@ -2232,15 +2341,20 @@ function _artBatchTitle(relPath, fallback){
 
 /* 批量栏入口：打开面板（左栏选模板/模型，右栏显示任务清单） */
 function batchGenArticles(){
-  if(!_sel.size){ alert("请先勾选要生成文章的视频"); return; }
+  if(!_sel.size){ alert("请先勾选要生成图文的视频"); return; }
   const all = currentCollItems().filter(it => _sel.has(it.rel_path) && !it.shared);
   const targets = all.filter(it => it.subtitle);
   const noSub = all.length - targets.length;
   if(!targets.length){
-    alert("选中的视频都没有关联字幕，无法生成文章。\n\n（需要「有字幕」且是你自己的视频；可在上传时附带字幕，或用「⬆ 上传」补一份。）");
+    // 区分「选错了类型」和「视频确实没字幕」：图文本来就没有 subtitle 字段，
+    // 不加这层判断会把它报成「没有关联字幕的视频」，用户会以为漏传了字幕。
+    const artN = all.filter(it => _isArticle(it)).length;
+    alert(artN && artN === all.length
+      ? "选中的都是图文，此操作只对视频生效。\n\n图文不需要「生成」——打开编辑器直接修改即可。"
+      : "选中的视频都没有关联字幕，无法生成图文。\n\n（需要「有字幕」且是你自己的视频；可在上传时附带字幕，或用「⬆ 上传」补一份。）");
     return;
   }
-  if(noSub && !confirm(`已选 ${targets.length} 个有字幕的视频，另有 ${noSub} 个没有字幕会被忽略。\n\n继续？`)) return;
+  if(noSub && !confirm(`已选 ${targets.length} 个有字幕的视频，另有 ${noSub} 个没有字幕或不是视频，会被忽略。\n\n继续？`)) return;
   _artTarget = null;
   _artBatch = {
     id: "", running: false,
@@ -2406,9 +2520,16 @@ async function batchDeleteArticles(){
     if(_sel.has(it.rel_path) && it.subtitle) subs.add(it.subtitle);
   });
   const arts = (_articleIndex || []).filter(a => a.rel_path && subs.has(a.rel_path));
-  if(!arts.length){ alert("选中的视频没有已生成的文章。"); return; }
+  if(!arts.length){
+    // 选中的本来就是图文时，「没有已生成的文章」会被理解成「文章丢了」，实际是选错类型
+    const allArt = [..._sel].every(r => /\.html?$/i.test(r || ""));
+    alert(allArt
+      ? "选中的是图文本身，此操作只对视频生效。\n\n要删除图文，请用「🗑 删除选中」。"
+      : "选中的视频没有已生成的图文。");
+    return;
+  }
   const vids = new Set(arts.map(a => a.rel_path)).size;
-  if(!confirm(`确定删除选中的 ${vids} 个视频关联的 ${arts.length} 篇文章？\n\n删除后无法恢复；视频与字幕文件不受影响。`)) return;
+  if(!confirm(`确定删除选中的 ${vids} 个视频关联的 ${arts.length} 篇图文？\n\n删除后无法恢复；视频与字幕文件不受影响。`)) return;
   let okN = 0; const failed = [];
   for(const a of arts){
     try{
@@ -2418,7 +2539,7 @@ async function batchDeleteArticles(){
   }
   clearSelection();
   await refreshArticleViews();
-  alert(`已删除 ${okN} 篇文章。`
+  alert(`已删除 ${okN} 篇图文。`
     + (failed.length ? `\n${failed.length} 篇删除失败：` + failed.slice(0,5).join("、") : ""));
 }
 
@@ -3257,107 +3378,6 @@ function closeImageLibrary(){ document.getElementById("imageLibMask").classList.
 let _imgTrashView = false;
 function toggleImageTrashView(){ _imgTrashView = !_imgTrashView; loadImageLibrary(); }
 
-/* ===== 本文图片（归档文章正文里的图，尚未入库） =====
-   背景：归档文章的图随 body 存放（resources/<rid>/<body_key8>/img_XXX.jpg），不属用户资产区，
-   所以图片库默认看不到。此处只做「只读列出 + 按需另存」，不批量入库、不改原文。
-   幂等：服务端 image_id = "i"+sha256(内容)[:15]，同一张图重复另存只会返回同一份。 */
-function _bodyDataUriImgs(){
-  if(!_aeDerive) return [];
-  const mask = document.getElementById("artEditorMask");
-  if(!mask || mask.classList.contains("hidden")) return [];
-  const body = document.getElementById("aeBody");
-  if(!body) return [];
-  return Array.from(body.querySelectorAll('img[src^="data:image/"]'));
-}
-
-/* 把 data URI 图上传成用户资产；成功后同步把正文里的 src 换成 /api/image/<id>，
-   这样后续保存派生不会再重复上传，图库的「使用中」也能识别到。 */
-async function _uploadBodyImages(imgs){
-  const BATCH = 10;                       // 分批：几十张大图一次提交容易超时
-  let uploaded = 0, dedup = 0;
-  for(let base = 0; base < imgs.length; base += BATCH){
-    const chunk = imgs.slice(base, base + BATCH);
-    const fd = new FormData();
-    const picked = [];
-    chunk.forEach((img, idx)=>{
-      const src = img.getAttribute("src") || "";
-      const m = /^data:image\/([a-zA-Z0-9+.-]+);base64,(.*)$/s.exec(src);
-      if(!m) return;
-      const bin = atob(m[2]);
-      const u8 = new Uint8Array(bin.length);
-      for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
-      let ext = m[1].toLowerCase();
-      if(ext === "jpeg") ext = "jpg";
-      if(ext === "svg+xml") ext = "svg";
-      fd.append("files", new File([u8], "body_" + Date.now() + "_" + (base + idx) + "." + ext,
-        {type:"image/" + m[1]}));
-      picked.push(img);
-    });
-    if(!picked.length) continue;
-    const r = await fetch("/api/image/upload", {method:"POST", body:fd});
-    const j = await r.json();
-    if(!r.ok) throw new Error(j.detail || ("HTTP " + r.status));
-    // 数量不符说明服务端跳过了某些文件，此时按序号回填会错配，中止替换
-    if((j.items || []).length !== picked.length)
-      throw new Error(`服务端返回 ${(j.items||[]).length} 张、提交 ${picked.length} 张，已停止替换以免图错位`);
-    picked.forEach((img, k)=>{
-      const it = j.items[k];
-      img.setAttribute("src", it.url);
-      uploaded++;
-      if(it.dedup) dedup++;
-    });
-  }
-  return {uploaded, dedup};
-}
-
-function _renderBodyImgSection(){
-  const sec = document.getElementById("bodyImgSec");
-  if(!sec) return;
-  const imgs = _bodyDataUriImgs();
-  const show = imgs.length > 0 && !_imgTrashView;
-  sec.classList.toggle("hidden", !show);
-  if(!show) return;
-  document.getElementById("bodyImgCount").textContent = String(imgs.length);
-  const g = document.getElementById("bodyImgGrid");
-  g.innerHTML = imgs.map((_, i)=>`
-    <div class="img-cell">
-      <img data-body-idx="${i}" alt="本文图 ${i+1}" loading="lazy">
-      <div class="imeta"><span>本文图 ${i+1}</span><span class="unused-tag">未入库</span></div>
-      <button class="btn-ghost btn-sm bis-save" onclick="saveOneBodyImage(${i})">⬇ 另存</button>
-    </div>`).join("");
-  // data URI 体积大，用属性回填避免拼接成巨量字符串
-  g.querySelectorAll("img[data-body-idx]").forEach(el=>{
-    const i = Number(el.dataset.bodyIdx);
-    if(imgs[i]) el.src = imgs[i].getAttribute("src");
-  });
-}
-
-async function saveOneBodyImage(idx){
-  const imgs = _bodyDataUriImgs();
-  const img = imgs[idx];
-  if(!img) return;
-  const msg = document.getElementById("imgLibMsg");
-  msg.textContent = "另存中…";
-  try{
-    const r = await _uploadBodyImages([img]);
-    await loadImageLibrary();
-    msg.textContent = r.dedup ? "这张图内容与库中已有图片相同，未重复保存" : "已另存 1 张到你的图片库";
-  }catch(e){ msg.textContent = "另存失败：" + e.message; }
-}
-
-async function saveAllBodyImages(){
-  const imgs = _bodyDataUriImgs();
-  if(!imgs.length){ document.getElementById("imgLibMsg").textContent = "本文没有待入库的图片"; return; }
-  const msg = document.getElementById("imgLibMsg");
-  msg.textContent = `正在另存 ${imgs.length} 张…`;
-  try{
-    const r = await _uploadBodyImages(imgs);
-    await loadImageLibrary();
-    msg.textContent = `已另存 ${r.uploaded} 张到你的图片库`
-      + (r.dedup ? `（其中 ${r.dedup} 张内容已存在，未重复保存）` : "");
-  }catch(e){ msg.textContent = "批量另存失败：" + e.message; }
-}
-
 async function loadImageLibrary(){
   const grid = document.getElementById("imgGrid");
   const msg = document.getElementById("imgLibMsg");
@@ -3376,7 +3396,6 @@ async function loadImageLibrary(){
   if(hint) hint.textContent = _imgTrashView ? "回收站里的图可恢复，或永久删除（不可恢复）"
     : "正在使用的图不可移入回收站（避免文章破图）";
   msg.textContent = "加载中…";
-  _renderBodyImgSection();
   try{
     const r = await fetch("/api/image/list");
     if(!r.ok) throw new Error("HTTP "+r.status);
@@ -3384,12 +3403,9 @@ async function loadImageLibrary(){
     _aeImages = j.items || [];
     const shown = _aeImages.filter(x=>!!x.trashed === _imgTrashView);
     if(!shown.length){
-      const bodyCount = _bodyDataUriImgs().length;
       grid.innerHTML = `<div class="muted">${_imgTrashView ? "回收站是空的。"
-        : (bodyCount
-            ? `你的图片库还没有图。上方「本文图片」有 ${bodyCount} 张待入库，可一键另存为你的资产；也可以直接上传新图。`
-            : "还没有图片。上传后即可在文章里引用；未使用的图可移入回收站。")}</div>`;
-      msg.textContent = bodyCount ? `本文 ${bodyCount} 张图待入库` : "";
+        : "还没有图片。可以在这里上传；归档图文的图在媒体库勾选该图文后点「🖼️ 图片入库」即可复制成你的资产。"}</div>`;
+      msg.textContent = "";
       return;
     }
     grid.innerHTML = shown.map(x=>`

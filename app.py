@@ -2578,12 +2578,36 @@ def _article_used_image_ids(sid):
                 pass
     return used
 
+def _image_put_bytes(sid, idx, data, ext, name):
+    """把一份图片字节写入本人资产区，内容寻址去重（iid = "i"+sha256(内容)[:15]）。
+
+    image_upload（前端上传）与 article_images_import（服务端从文章取图）共用此函数，
+    保证两条路的落盘 / 去重 / index 语义完全一致。
+    返回 (iid, dedup, restored)：
+      dedup=True    库里已有同内容图，本次未重复落盘；
+      restored=True 该图此前在回收站，本次被重新激活（另存语义 = 我要用它）。"""
+    h = hashlib.sha256(data).hexdigest()
+    iid = "i" + h[:15]
+    root = _image_root(sid)
+    os.makedirs(root, exist_ok=True)
+    dest = os.path.join(root, iid + ext)
+    dedup = iid in idx and os.path.isfile(dest)
+    restored = False
+    if not dedup:
+        with open(dest, "wb") as w:
+            w.write(data)
+        idx[iid] = {"ext": ext, "name": _safe_upload_name(name or (iid + ext)),
+                    "size": len(data), "added_at": int(time.time()), "trashed": False}
+    elif (idx.get(iid) or {}).get("trashed"):
+        idx[iid]["trashed"] = False
+        restored = True
+    return iid, dedup, restored
+
 @app.post("/api/image/upload")
 async def image_upload(files: list[UploadFile] = File(...), sid: str = Depends(current_identity)):
     """上传图片到本人隔离区 users/<hash>/images/，按内容哈希 id 去重。
-    返回 [{id, url, name, size, dedup}]；前端拿到 url 写进富文本 <img src>。"""
-    root = _image_root(sid)
-    os.makedirs(root, exist_ok=True)
+    返回 [{id, url, name, size, dedup, restored}]；前端拿到 url 写进富文本 <img src>。"""
+    os.makedirs(_image_root(sid), exist_ok=True)
     idx = _load_image_index(sid)
     out = []
     for f in files:
@@ -2594,20 +2618,183 @@ async def image_upload(files: list[UploadFile] = File(...), sid: str = Depends(c
             data = await f.read()
         except Exception:
             continue
-        h = hashlib.sha256(data).hexdigest()
-        iid = "i" + h[:15]                      # 用户内内容去重
-        dest = os.path.join(root, iid + ext)
-        dedup = iid in idx and os.path.isfile(dest)
-        if not dedup:
-            # 同一哈希不同扩展名共存时保留首次；清理旧形式避免残留
-            with open(dest, "wb") as w:
-                w.write(data)
-            idx[iid] = {"ext": ext, "name": _safe_upload_name(f.filename or (iid + ext)),
-                        "size": len(data), "added_at": int(time.time()), "trashed": False}
+        iid, dedup, restored = _image_put_bytes(sid, idx, data, ext, f.filename or "")
+        meta = idx.get(iid) or {}
         out.append({"id": iid, "url": "/api/image/" + iid,
-                    "name": idx[iid]["name"], "size": idx[iid]["size"], "dedup": dedup})
+                    "name": meta.get("name", iid), "size": meta.get("size", len(data)),
+                    "dedup": dedup, "restored": restored})
     _save_image_index(sid, idx)
     return {"ok": True, "items": out}
+
+# ---------- 文章图片入库（服务端取图，前端只发 rel_path）----------
+# 为什么放服务端：被入库的图本来就在资源池里（resources/<rid>/<bk8>/），
+# 前端取图只能 blob → base64 → POST 回同一台机器，白跑两遍带宽还要过网关；
+# 服务端直接读文件算 sha256 走 _image_put_bytes 即可。
+ARTICLE_IMG_MAX_BYTES = 20 * 1024 * 1024    # 单张上限，防超大图拖垮请求
+ARTICLE_IMG_MAX_PER_ARTICLE = 300           # 单篇上限，防异常 HTML 塞暴列表
+
+class _ImgSrcCollector(HTMLParser):
+    """只收 <img src>，不做清洗——入库要的是原始引用。"""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.srcs = []
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "img":
+            return
+        for k, v in attrs:
+            if k.lower() == "src":
+                if v:
+                    self.srcs.append(v.strip())
+                break
+
+def _article_img_srcs(html_text):
+    p = _ImgSrcCollector()
+    try:
+        p.feed(html_text or "")
+    except Exception:
+        pass
+    return p.srcs
+
+def _resolve_pool_image(rel_html, src):
+    """把文章里的 <img src> 解析成池内绝对路径。
+    非池内引用（data:/http:/api/image/ 已有资产）返回 ""——本函数只负责「本地文件」这一类。"""
+    s = (src or "").strip()
+    if not s or s.startswith("data:") or s.startswith("//"):
+        return ""
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", s):   # http: https: ftp: 等外链
+        return ""
+    if s.startswith("/"):                            # /api/image/<id> 或站内绝对路径
+        return ""
+    s = urllib.parse.unquote(s)
+    base = os.path.join(DOWNLOADS, rel_html)
+    ap = os.path.abspath(os.path.join(os.path.dirname(base), s))
+    root = os.path.abspath(DOWNLOADS)
+    if not ap.startswith(root + os.sep) or not os.path.isfile(ap):
+        return ""
+    return ap
+
+class ArticleImagesImportReq(BaseModel):
+    rel_paths: list[str] = []
+
+@app.post("/api/article/images/import")
+def article_images_import(req: ArticleImagesImportReq, sid: str = Depends(current_identity)):
+    """把选中图文的「正文图片 + 封面」复制成本人的图片资产（幂等）。
+
+    语义边界（2026-11-24）：
+      - 只处理【本人】条目；不属你 / 非图文 / 正文缺失 → 该条 skipped 回报，不整批失败。
+      - 正文取池内相对引用的图；`/api/image/<id>` 说明本来就是资产，计入 already_asset 跳过。
+      - 封面（images[] 里主干为 cover 的那张）一并入库——采集端把它单独存成 cover.jpg，
+        不在正文 <img> 里，不特意处理就永远收不到。
+      - 入库是「复制一份资产」：文章正文仍引用自己目录里的图，删资产不会让文章破图。
+    """
+    if not sid:
+        raise HTTPException(401, "需登录")
+    rels, seen_rel = [], set()
+    for r in (req.rel_paths or []):
+        r = (r or "").replace("\\", "/").strip()
+        if r and r not in seen_rel:
+            seen_rel.add(r)
+            rels.append(r)
+    if not rels:
+        raise HTTPException(400, "rel_paths 不能为空")
+
+    data = _load_collections()
+    by_rel = {}
+    for c in (data.get(sid, {}) or {}).get("collections", []):
+        for it in c.get("items", []):
+            rel = (it.get("rel_path") or "").replace("\\", "/")
+            if rel:
+                by_rel.setdefault(rel, it)
+
+    idx = _load_image_index(sid)
+    per_item = []
+    tot_added = tot_dedup = tot_restored = 0
+    for rel in rels:
+        it = by_rel.get(rel)
+        row = {"rel_path": rel, "title": (it or {}).get("title", ""),
+               "found": 0, "added": 0, "dedup": 0, "restored": 0,
+               "already_asset": 0, "skipped": [], "reason": ""}
+        if not it:
+            row["reason"] = "不属于你或条目不存在"
+            per_item.append(row)
+            continue
+        if not rel.lower().endswith(".html"):
+            row["reason"] = "不是图文条目"
+            per_item.append(row)
+            continue
+        ap = os.path.join(DOWNLOADS, rel)
+        if not os.path.isfile(ap):
+            row["reason"] = "正文文件不存在"
+            per_item.append(row)
+            continue
+        try:
+            with open(ap, encoding="utf-8", errors="ignore") as f:
+                html_text = f.read()
+        except Exception as e:
+            row["reason"] = "读取正文失败：%s" % e
+            per_item.append(row)
+            continue
+
+        # 候选：正文图（按出现顺序去重）+ 封面（置顶，只取一张）
+        cands, seen_abs = [], set()
+        for ipath in (it.get("images") or []):
+            ipath = (ipath or "").replace("\\", "/")
+            stem = os.path.splitext(os.path.basename(ipath))[0].lower()
+            if stem == "cover":
+                p = os.path.join(DOWNLOADS, ipath)
+                if os.path.isfile(p):
+                    cands.append(p)
+                    seen_abs.add(os.path.abspath(p))
+                break
+        for s in _article_img_srcs(html_text):
+            if "/api/image/" in s:
+                row["already_asset"] += 1
+                continue
+            p = _resolve_pool_image(rel, s)
+            if not p:
+                continue
+            k = os.path.abspath(p)
+            if k in seen_abs:
+                continue
+            seen_abs.add(k)
+            cands.append(p)
+        cands = cands[:ARTICLE_IMG_MAX_PER_ARTICLE]
+        row["found"] = len(cands)
+
+        label = re.sub(r"\s+", " ", (row["title"] or "")).strip()[:16].strip(" _-.,，。:：、")
+        for p in cands:
+            base_name = os.path.basename(p)
+            ext = os.path.splitext(base_name)[1].lower()
+            if ext not in IMG_EXTS:
+                row["skipped"].append(base_name)
+                continue
+            try:
+                if os.path.getsize(p) > ARTICLE_IMG_MAX_BYTES:
+                    row["skipped"].append(base_name)
+                    continue
+                with open(p, "rb") as r:
+                    blob = r.read()
+            except Exception:
+                row["skipped"].append(base_name)
+                continue
+            iid, dedup, restored = _image_put_bytes(
+                sid, idx, blob, ext, (label + "_" + base_name) if label else base_name)
+            if dedup:
+                row["dedup"] += 1
+                tot_dedup += 1
+            else:
+                row["added"] += 1
+                tot_added += 1
+            if restored:
+                row["restored"] += 1
+                tot_restored += 1
+        per_item.append(row)
+
+    if tot_added or tot_dedup:
+        _save_image_index(sid, idx)
+    return {"ok": True, "per_item": per_item,
+            "total_added": tot_added, "total_dedup": tot_dedup,
+            "total_restored": tot_restored}
 
 @app.get("/api/image/list")
 def image_list(sid: str = Depends(current_identity)):
