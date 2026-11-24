@@ -194,11 +194,21 @@
   .ae-body img{max-width:100%;height:auto;display:block;margin:14px auto;border-radius:4px}
   .ae-body a{color:#576b95}
   .img-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px;max-height:52vh;overflow:auto}
+  .img-grid > .muted{grid-column:1/-1;line-height:1.7}
   .img-cell{position:relative;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#fafbfd}
   .img-cell img{width:100%;aspect-ratio:1;object-fit:cover;display:block}
   .img-cell .imeta{padding:6px 8px;font-size:11.5px;color:var(--sub);display:flex;justify-content:space-between;align-items:center;gap:4px}
   .img-cell input[type=checkbox]{position:absolute;top:6px;left:6px;z-index:2}
   .img-cell .used-tag{color:#2b6cb0;font-weight:600} .img-cell .unused-tag{color:#b09a2b}
+  /* 本文图片（未入库，来自归档文章正文） */
+  .body-img-sec{border:1px solid var(--line);border-radius:10px;padding:10px;background:#fbfcfe}
+  .body-img-sec .bis-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+  .body-img-sec .bis-title{font-size:12.5px;color:var(--sub)}
+  .body-img-sec .bis-title b{color:#2b6cb0;font-size:13.5px}
+  .body-img-sec .bis-grid{max-height:32vh}
+  .body-img-sec .bis-tip{font-size:11.5px;color:var(--sub);line-height:1.6;margin-top:8px}
+  .body-img-sec .img-cell{background:#fff}
+  .body-img-sec .img-cell .bis-save{margin:0 6px 7px;width:calc(100% - 12px)}
   /* 批量选择 */
   .lib-card{position:relative}
   .lib-card .pick{position:absolute;top:8px;left:8px;width:20px;height:20px;accent-color:var(--primary);
@@ -684,6 +694,15 @@
           <button class="btn-danger btn-sm hidden" id="btnPurgeImgs" onclick="purgeSelectedImages()">🗑 永久删除</button>
           <button class="btn-ghost btn-sm" id="btnToggleImgTrash" onclick="toggleImageTrashView()">🗑 回收站</button>
           <span class="muted" id="imgLibHint">正在使用的图不可移入回收站（避免文章破图）</span>
+        </div>
+        <!-- 本文图片：归档文章正文里的图随文章存放、不属于用户资产，此处可一键另存入库 -->
+        <div id="bodyImgSec" class="body-img-sec hidden">
+          <div class="bis-head">
+            <span class="bis-title">本文图片 <b id="bodyImgCount">0</b> 张 · 尚未入库</span>
+            <button class="btn-ghost btn-sm" onclick="saveAllBodyImages()">⬇ 全部另存为我的图片</button>
+          </div>
+          <div id="bodyImgGrid" class="img-grid bis-grid"></div>
+          <div class="bis-tip">这些图跟随文章存放，不算你的图片资产，也无法插入其它图文。另存后即成为你的图片，可在下方图库统一管理与复用。</div>
         </div>
         <div id="imgGrid" class="img-grid"></div>
         <div id="imgLibMsg" class="muted"></div>
@@ -3238,6 +3257,107 @@ function closeImageLibrary(){ document.getElementById("imageLibMask").classList.
 let _imgTrashView = false;
 function toggleImageTrashView(){ _imgTrashView = !_imgTrashView; loadImageLibrary(); }
 
+/* ===== 本文图片（归档文章正文里的图，尚未入库） =====
+   背景：归档文章的图随 body 存放（resources/<rid>/<body_key8>/img_XXX.jpg），不属用户资产区，
+   所以图片库默认看不到。此处只做「只读列出 + 按需另存」，不批量入库、不改原文。
+   幂等：服务端 image_id = "i"+sha256(内容)[:15]，同一张图重复另存只会返回同一份。 */
+function _bodyDataUriImgs(){
+  if(!_aeDerive) return [];
+  const mask = document.getElementById("artEditorMask");
+  if(!mask || mask.classList.contains("hidden")) return [];
+  const body = document.getElementById("aeBody");
+  if(!body) return [];
+  return Array.from(body.querySelectorAll('img[src^="data:image/"]'));
+}
+
+/* 把 data URI 图上传成用户资产；成功后同步把正文里的 src 换成 /api/image/<id>，
+   这样后续保存派生不会再重复上传，图库的「使用中」也能识别到。 */
+async function _uploadBodyImages(imgs){
+  const BATCH = 10;                       // 分批：几十张大图一次提交容易超时
+  let uploaded = 0, dedup = 0;
+  for(let base = 0; base < imgs.length; base += BATCH){
+    const chunk = imgs.slice(base, base + BATCH);
+    const fd = new FormData();
+    const picked = [];
+    chunk.forEach((img, idx)=>{
+      const src = img.getAttribute("src") || "";
+      const m = /^data:image\/([a-zA-Z0-9+.-]+);base64,(.*)$/s.exec(src);
+      if(!m) return;
+      const bin = atob(m[2]);
+      const u8 = new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
+      let ext = m[1].toLowerCase();
+      if(ext === "jpeg") ext = "jpg";
+      if(ext === "svg+xml") ext = "svg";
+      fd.append("files", new File([u8], "body_" + Date.now() + "_" + (base + idx) + "." + ext,
+        {type:"image/" + m[1]}));
+      picked.push(img);
+    });
+    if(!picked.length) continue;
+    const r = await fetch("/api/image/upload", {method:"POST", body:fd});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.detail || ("HTTP " + r.status));
+    // 数量不符说明服务端跳过了某些文件，此时按序号回填会错配，中止替换
+    if((j.items || []).length !== picked.length)
+      throw new Error(`服务端返回 ${(j.items||[]).length} 张、提交 ${picked.length} 张，已停止替换以免图错位`);
+    picked.forEach((img, k)=>{
+      const it = j.items[k];
+      img.setAttribute("src", it.url);
+      uploaded++;
+      if(it.dedup) dedup++;
+    });
+  }
+  return {uploaded, dedup};
+}
+
+function _renderBodyImgSection(){
+  const sec = document.getElementById("bodyImgSec");
+  if(!sec) return;
+  const imgs = _bodyDataUriImgs();
+  const show = imgs.length > 0 && !_imgTrashView;
+  sec.classList.toggle("hidden", !show);
+  if(!show) return;
+  document.getElementById("bodyImgCount").textContent = String(imgs.length);
+  const g = document.getElementById("bodyImgGrid");
+  g.innerHTML = imgs.map((_, i)=>`
+    <div class="img-cell">
+      <img data-body-idx="${i}" alt="本文图 ${i+1}" loading="lazy">
+      <div class="imeta"><span>本文图 ${i+1}</span><span class="unused-tag">未入库</span></div>
+      <button class="btn-ghost btn-sm bis-save" onclick="saveOneBodyImage(${i})">⬇ 另存</button>
+    </div>`).join("");
+  // data URI 体积大，用属性回填避免拼接成巨量字符串
+  g.querySelectorAll("img[data-body-idx]").forEach(el=>{
+    const i = Number(el.dataset.bodyIdx);
+    if(imgs[i]) el.src = imgs[i].getAttribute("src");
+  });
+}
+
+async function saveOneBodyImage(idx){
+  const imgs = _bodyDataUriImgs();
+  const img = imgs[idx];
+  if(!img) return;
+  const msg = document.getElementById("imgLibMsg");
+  msg.textContent = "另存中…";
+  try{
+    const r = await _uploadBodyImages([img]);
+    await loadImageLibrary();
+    msg.textContent = r.dedup ? "这张图内容与库中已有图片相同，未重复保存" : "已另存 1 张到你的图片库";
+  }catch(e){ msg.textContent = "另存失败：" + e.message; }
+}
+
+async function saveAllBodyImages(){
+  const imgs = _bodyDataUriImgs();
+  if(!imgs.length){ document.getElementById("imgLibMsg").textContent = "本文没有待入库的图片"; return; }
+  const msg = document.getElementById("imgLibMsg");
+  msg.textContent = `正在另存 ${imgs.length} 张…`;
+  try{
+    const r = await _uploadBodyImages(imgs);
+    await loadImageLibrary();
+    msg.textContent = `已另存 ${r.uploaded} 张到你的图片库`
+      + (r.dedup ? `（其中 ${r.dedup} 张内容已存在，未重复保存）` : "");
+  }catch(e){ msg.textContent = "批量另存失败：" + e.message; }
+}
+
 async function loadImageLibrary(){
   const grid = document.getElementById("imgGrid");
   const msg = document.getElementById("imgLibMsg");
@@ -3256,6 +3376,7 @@ async function loadImageLibrary(){
   if(hint) hint.textContent = _imgTrashView ? "回收站里的图可恢复，或永久删除（不可恢复）"
     : "正在使用的图不可移入回收站（避免文章破图）";
   msg.textContent = "加载中…";
+  _renderBodyImgSection();
   try{
     const r = await fetch("/api/image/list");
     if(!r.ok) throw new Error("HTTP "+r.status);
@@ -3263,8 +3384,13 @@ async function loadImageLibrary(){
     _aeImages = j.items || [];
     const shown = _aeImages.filter(x=>!!x.trashed === _imgTrashView);
     if(!shown.length){
-      grid.innerHTML = `<div class="muted">${_imgTrashView ? "回收站是空的。" : "还没有图片。上传后即可在文章里引用；未使用的图可移入回收站。"}</div>`;
-      msg.textContent = ""; return;
+      const bodyCount = _bodyDataUriImgs().length;
+      grid.innerHTML = `<div class="muted">${_imgTrashView ? "回收站是空的。"
+        : (bodyCount
+            ? `你的图片库还没有图。上方「本文图片」有 ${bodyCount} 张待入库，可一键另存为你的资产；也可以直接上传新图。`
+            : "还没有图片。上传后即可在文章里引用；未使用的图可移入回收站。")}</div>`;
+      msg.textContent = bodyCount ? `本文 ${bodyCount} 张图待入库` : "";
+      return;
     }
     grid.innerHTML = shown.map(x=>`
       <div class="img-cell">
