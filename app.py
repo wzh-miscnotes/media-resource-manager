@@ -40,6 +40,8 @@ import secrets
 
 import base64
 
+import io
+
 import zipfile
 
 import ipaddress
@@ -182,6 +184,244 @@ def _rewrite_dl_host(url: str) -> str:
     except Exception:
         pass
     return url
+
+
+# ============ ONLYOFFICE 新建：内置最小空白模板（零外部依赖，2026-11-25）============
+# 设计要点：
+#   1. docx/xlsx/pptx 是 OOXML zip，pdf 是最小合法 PDF；均用纯字符串拼装，不引第三方库。
+#   2. 唯一标记写进 docProps/core.xml（dc:identifier=uuid + dcterms:created=毫秒时间），
+#      使每次新建的字节不同 → sha256 不同 → rid 不同，避免内容去重把多份新文档合并成一份。
+#   3. zip 条目时间固定为 1980-01-01，保证字节差异只来自 core.xml，便于复现与测试。
+_OO_CREATE_EXT = {"word": ".docx", "cell": ".xlsx", "slide": ".pptx", "pdf": ".pdf"}
+_OO_CREATE_LABEL = {"word": "文档", "cell": "表格", "slide": "演示文稿", "pdf": "PDF 文档"}
+
+_XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+_NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+_NS_REL_DOC = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+# 每个 documentType 的部件表；core.xml 由 _oo_core_xml() 动态注入，故此处不含它。
+_OO_XML_PARTS = {
+    "word": {
+        "[Content_Types].xml": (
+            _XML_DECL + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+            '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+            '</Types>'
+        ),
+        "_rels/.rels": (
+            _XML_DECL + f'<Relationships xmlns="{_NS_PKG_REL}">'
+            f'<Relationship Id="rId1" Type="{_NS_REL_DOC}/officeDocument" Target="word/document.xml"/>'
+            f'<Relationship Id="rId2" Type="{_NS_PKG_REL}/metadata/core-properties" Target="docProps/core.xml"/>'
+            '</Relationships>'
+        ),
+        "word/document.xml": (
+            _XML_DECL + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:body><w:p/></w:body></w:document>'
+        ),
+    },
+    "cell": {
+        "[Content_Types].xml": (
+            _XML_DECL + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+            '</Types>'
+        ),
+        "_rels/.rels": (
+            _XML_DECL + f'<Relationships xmlns="{_NS_PKG_REL}">'
+            f'<Relationship Id="rId1" Type="{_NS_REL_DOC}/officeDocument" Target="xl/workbook.xml"/>'
+            f'<Relationship Id="rId2" Type="{_NS_PKG_REL}/metadata/core-properties" Target="docProps/core.xml"/>'
+            '</Relationships>'
+        ),
+        "xl/workbook.xml": (
+            _XML_DECL + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            f'xmlns:r="{_NS_REL_DOC}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>'
+        ),
+        "xl/_rels/workbook.xml.rels": (
+            _XML_DECL + f'<Relationships xmlns="{_NS_PKG_REL}">'
+            f'<Relationship Id="rId1" Type="{_NS_REL_DOC}/worksheet" Target="worksheets/sheet1.xml"/>'
+            '</Relationships>'
+        ),
+        "xl/worksheets/sheet1.xml": (
+            _XML_DECL + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'
+        ),
+    },
+    "slide": {
+        "[Content_Types].xml": (
+            _XML_DECL + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
+            '<Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>'
+            '<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+            '<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
+            '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>'
+            '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+            '</Types>'
+        ),
+        "_rels/.rels": (
+            _XML_DECL + f'<Relationships xmlns="{_NS_PKG_REL}">'
+            f'<Relationship Id="rId1" Type="{_NS_REL_DOC}/officeDocument" Target="ppt/presentation.xml"/>'
+            f'<Relationship Id="rId2" Type="{_NS_PKG_REL}/metadata/core-properties" Target="docProps/core.xml"/>'
+            '</Relationships>'
+        ),
+        "ppt/presentation.xml": (
+            _XML_DECL + '<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            f'xmlns:r="{_NS_REL_DOC}" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+            '<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>'
+            '<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>'
+            '<p:sldSz cx="9144000" cy="6858000" type="screen4x3"/>'
+            '<p:notesSz cx="6858000" cy="9144000"/></p:presentation>'
+        ),
+        "ppt/_rels/presentation.xml.rels": (
+            _XML_DECL + f'<Relationships xmlns="{_NS_PKG_REL}">'
+            f'<Relationship Id="rId1" Type="{_NS_REL_DOC}/slideMaster" Target="slideMasters/slideMaster1.xml"/>'
+            f'<Relationship Id="rId2" Type="{_NS_REL_DOC}/slide" Target="slides/slide1.xml"/>'
+            f'<Relationship Id="rId3" Type="{_NS_REL_DOC}/theme" Target="theme/theme1.xml"/>'
+            '</Relationships>'
+        ),
+        "ppt/slideMasters/slideMaster1.xml": (
+            _XML_DECL + '<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            f'xmlns:r="{_NS_REL_DOC}" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+            '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/>'
+            '</p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld>'
+            '<p:clrMap accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" '
+            'accent5="accent5" accent6="accent6" bg1="lt1" bg2="lt2" folHlink="folHlink" '
+            'hlink="hlink" tx1="dk1" tx2="dk2"/>'
+            '<p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst>'
+            '</p:sldMaster>'
+        ),
+        "ppt/slideMasters/_rels/slideMaster1.xml.rels": (
+            _XML_DECL + f'<Relationships xmlns="{_NS_PKG_REL}">'
+            f'<Relationship Id="rId1" Type="{_NS_REL_DOC}/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>'
+            f'<Relationship Id="rId2" Type="{_NS_REL_DOC}/theme" Target="../theme/theme1.xml"/>'
+            '</Relationships>'
+        ),
+        "ppt/slideLayouts/slideLayout1.xml": (
+            _XML_DECL + '<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            f'xmlns:r="{_NS_REL_DOC}" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+            'type="blank" preserve="1"><p:cSld name="Blank">'
+            '<p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>'
+            '<p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>'
+        ),
+        "ppt/slideLayouts/_rels/slideLayout1.xml.rels": (
+            _XML_DECL + f'<Relationships xmlns="{_NS_PKG_REL}">'
+            f'<Relationship Id="rId1" Type="{_NS_REL_DOC}/slideMaster" Target="../slideMasters/slideMaster1.xml"/>'
+            '</Relationships>'
+        ),
+        "ppt/slides/slide1.xml": (
+            _XML_DECL + '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            f'xmlns:r="{_NS_REL_DOC}" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+            '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>'
+            '<p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>'
+        ),
+        "ppt/slides/_rels/slide1.xml.rels": (
+            _XML_DECL + f'<Relationships xmlns="{_NS_PKG_REL}">'
+            f'<Relationship Id="rId1" Type="{_NS_REL_DOC}/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>'
+            '</Relationships>'
+        ),
+        "ppt/theme/theme1.xml": (
+            _XML_DECL + '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="RM">'
+            '<a:themeElements><a:clrScheme name="RM">'
+            '<a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>'
+            '<a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>'
+            '<a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>'
+            '<a:accent1><a:srgbClr val="4472C4"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2>'
+            '<a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4>'
+            '<a:accent5><a:srgbClr val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6>'
+            '<a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink>'
+            '</a:clrScheme><a:fontScheme name="RM">'
+            '<a:majorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>'
+            '<a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>'
+            '</a:fontScheme><a:fmtScheme name="RM"><a:fillStyleLst>'
+            '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+            '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+            '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst>'
+            '<a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>'
+            '<a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>'
+            '<a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst>'
+            '<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle>'
+            '<a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>'
+            '<a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+            '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+            '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst>'
+            '</a:fmtScheme></a:themeElements><a:objectDefaults/><a:extraClrSchemeLst/></a:theme>'
+        ),
+    },
+}
+
+
+def _oo_core_xml(title, uid, ts):
+    """OOXML core 属性：注入唯一标记，使同类型每次新建的字节不同。"""
+    return (
+        _XML_DECL + '<cp:coreProperties '
+        'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        '<dc:title>' + html_escape(title) + '</dc:title>'
+        '<dc:creator>RM</dc:creator>'
+        '<cp:keywords>' + uid + '</cp:keywords>'
+        '<dc:identifier>' + uid + '</dc:identifier>'
+        '<dcterms:created xsi:type="dcterms:W3CDTF">' + ts + '</dcterms:created>'
+        '<dcterms:modified xsi:type="dcterms:W3CDTF">' + ts + '</dcterms:modified>'
+        '</cp:coreProperties>'
+    )
+
+
+def _oo_blank_ooxml(doc_type, title, uid, ts):
+    """按 documentType 生成最小合法 OOXML zip 字节；zip 条目时间固定，唯一性只靠 core.xml。"""
+    parts = dict(_OO_XML_PARTS[doc_type])
+    parts["docProps/core.xml"] = _oo_core_xml(title, uid, ts)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in sorted(parts):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(info, parts[name].encode("utf-8"))
+    return buf.getvalue()
+
+
+def _oo_blank_pdf(title, uid, ts):
+    """生成最小合法 PDF；/Info 的 Title + CreationDate 注入唯一标记。"""
+    def esc(s):
+        return str(s).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    info = (f"/Title ({esc(title)}) /Author (RM) /Subject ({uid}) "
+            f"/CreationDate (D:{ts.replace('-', '').replace(':', '').replace('T', '').rstrip('Z')}) "
+            f"/Producer (RM)")
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << >> >>",
+        ("<< " + info + " >>").encode("latin-1", "replace"),
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode("ascii") + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n".encode("ascii")
+    out += b"0000000000 65535 f \n"
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode("ascii")
+    out += (f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R /Info 4 0 R >>\n"
+            f"startxref\n{xref_at}\n%%EOF\n").encode("ascii")
+    return bytes(out)
+
+
+def _oo_blank_bytes(doc_type, title):
+    """统一入口：返回 (bytes, 扩展名, 时间戳)。每次调用生成唯一内容。"""
+    uid = uuid.uuid4().hex
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + f".{time.time_ns() % 1_000_000:06d}Z"
+    ext = _OO_CREATE_EXT[doc_type]
+    if doc_type == "pdf":
+        return _oo_blank_pdf(title, uid, ts), ext, ts
+    return _oo_blank_ooxml(doc_type, title, uid, ts), ext, ts
 
 
 def normalize_identity(name: str) -> str:
@@ -1698,6 +1938,46 @@ new DocsAPI.DocEditor("editor", cfg);
 def html_escape(s):
     return (str(s).replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+class OOCreateReq(BaseModel):
+    doc_type: str = ""      # word / cell / slide / pdf（即 documentType）
+    title: str = ""
+    cid: str = "default"
+
+
+@app.post("/api/oo/create")
+def oo_create(req: OOCreateReq, request: Request):
+    """新建空白 Office 文档并入池（默认关闭）。造字节全在 RM 本地，不调用文档服务。"""
+    _oo_guard()
+    sid = current_identity(request)
+    if not sid:
+        raise HTTPException(401, "需登录")
+    dt = (req.doc_type or "").strip().lower()
+    if dt not in _OO_CREATE_EXT:
+        raise HTTPException(400, "不支持的文档类型：" + dt)
+    title = (req.title or "").strip() or f"未命名{_OO_CREATE_LABEL[dt]}"
+
+    data, ext, _ts = _oo_blank_bytes(dt, title)
+    h = hashlib.sha256(data).hexdigest()
+    rid = "r" + h[:15]
+    body_key8 = _body_key8_from_hash(h)
+    stage_dir = os.path.join(user_root(sid), "_staging")
+    os.makedirs(stage_dir, exist_ok=True)
+    safe = _safe_upload_name(title + ext)
+    dest = _uniq_path(os.path.join(stage_dir, safe))
+    with open(dest, "wb") as w:
+        w.write(data)
+    try:
+        _ingest_into_pool(sid, rid, body_key8, dest, [], title,
+                          target_cid=(req.cid or "default"),
+                          content_sha256=h, source_type="office")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, "新建文档入池失败：" + str(e))
+    return {"ok": True, "rid": rid, "title": title, "doc_type": dt,
+            "file_type": ext.lstrip("."), "size": len(data)}
 
 
 class LoginReq(BaseModel):
