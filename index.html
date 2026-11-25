@@ -155,6 +155,23 @@
   .tabs .spacer{flex:1}
   .nav-act{margin-left:8px;font-size:13px;padding:6px 12px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--text);cursor:pointer;white-space:nowrap}
   .nav-act:hover{border-color:#7aa7ff;color:#2b6cb0}
+  /* ONLYOFFICE 新建文档下拉（2026-11-25）：完全复用 RM token，不引入外部样式 */
+  .oo-create-wrap{position:relative;display:inline-flex}
+  .oo-create-wrap.hidden{display:none}   /* 压过上面的 inline-flex */
+  .oo-create-menu{position:absolute;top:calc(100% + 6px);left:0;z-index:30;
+    width:264px;background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:10px;box-shadow:0 8px 28px rgba(20,30,60,.14)}
+  .oo-create-menu.hidden{display:none}
+  .oo-create-menu .oo-hint{font-size:11px;color:var(--sub);padding:0 6px 8px}
+  .oo-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .oo-item{display:flex;align-items:center;gap:8px;padding:9px 10px;border:1.5px solid var(--line);
+    border-radius:8px;background:#fff;cursor:pointer;font-size:13px;font-weight:500;
+    color:var(--text);text-align:left;line-height:1.25}
+  .oo-item:hover,.oo-item:focus{border-color:var(--primary);background:#fff6f9;outline:none}
+  .oo-item svg{flex:none;width:18px;height:18px;stroke:var(--primary);fill:none;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .oo-item .oo-nm{display:block}
+  .oo-item .oo-ex{display:block;font-size:11px;color:var(--sub)}
   /* 回收站卡片：恢复/清理按钮浮于右上角 */
   .lib-card.trash-card{position:relative}
   .trash-actions{position:absolute;top:8px;right:8px;display:flex;gap:6px;z-index:2}
@@ -542,6 +559,31 @@
         <button class="btn-ghost btn-sm" id="btnUpload" onclick="openUpload()" data-page-node-id="tSrfiE3LOHnTkdCjjSf8CI">⬆ 上传</button>
         <button class="btn-ghost btn-sm" id="btnImportDir" onclick="openImportDir()" data-page-node-id="rmImportDir">📂 目录导入</button>
         <button class="btn-primary btn-sm" id="btnNewArticle" onclick="switchTab('article');openArtEditor()" title="用富文本编辑器新建图文（开源部署无需采集端）">✍️ 新建图文</button>
+        <!-- ONLYOFFICE 新建文档：仅后端 oo_enabled=true 时显示，与「新建图文」并列且互不干扰 -->
+        <span class="oo-create-wrap hidden" id="ooCreateWrap">
+          <button class="btn-primary btn-sm" id="btnOOCreate" onclick="toggleOOCreateMenu(event)" title="新建空白在线文档（需启用 ONLYOFFICE 集成）">＋ 新建文档 ▾</button>
+          <div class="oo-create-menu hidden" id="ooCreateMenu">
+            <div class="oo-hint">选择类型，创建后自动打开编辑器</div>
+            <div class="oo-grid">
+              <button class="oo-item" onclick="createOODoc('word')" title="创建空白 Word 文档">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6zM14 2v5h4M9 12h6M9 16h6"/></svg>
+                <span><span class="oo-nm">文档</span><span class="oo-ex">.docx</span></span>
+              </button>
+              <button class="oo-item" onclick="createOODoc('cell')" title="创建空白表格">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 10h16M4 15h16M10 5v14"/></svg>
+                <span><span class="oo-nm">表格</span><span class="oo-ex">.xlsx</span></span>
+              </button>
+              <button class="oo-item" onclick="createOODoc('slide')" title="创建空白演示文稿">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="13" rx="1"/><path d="M8 21h8M12 9v5M9.5 11.5L12 14l2.5-2.5"/></svg>
+                <span><span class="oo-nm">演示</span><span class="oo-ex">.pptx</span></span>
+              </button>
+              <button class="oo-item" onclick="createOODoc('pdf')" title="创建空白 PDF">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6zM14 2v5h4M9 13h6M9 17h4"/></svg>
+                <span><span class="oo-nm">PDF</span><span class="oo-ex">.pdf</span></span>
+              </button>
+            </div>
+          </div>
+        </span>
       </div>
       <div class="lib-batch hidden" id="libBatch" data-page-node-id="5zJyIJgQOloc0gnXBvjYID">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer" data-page-node-id="DFOGW184GPnk2rukrNCxKL">
@@ -1391,6 +1433,60 @@ function _ooBtn(it, i){
 function openOnlyOffice(item){
   if(!item || !item.resource_id){ alert("该资源缺少 resource_id，无法在线编辑"); return; }
   window.open("/office/edit?rid=" + encodeURIComponent(item.resource_id), "_blank");
+}
+
+/* ---- 新建文档下拉（2026-11-25）----
+   入口受 oo_enabled 控制（见 _applyOOUI）；只列官方原生可编辑的四类。
+   新建全程在 RM 后端 /api/oo/create 完成（自造空白字节并入池，不调用文档服务），
+   前端只收集类型 + 当前合集，拿到 rid 后走同一个 /office/edit 编辑入口。 */
+const _OO_CREATE_LABEL = {word:"文档", cell:"表格", slide:"演示", pdf:"PDF"};
+function toggleOOCreateMenu(ev){
+  if(ev) ev.stopPropagation();
+  const m = document.getElementById("ooCreateMenu");
+  if(m) m.classList.toggle("hidden");
+}
+function closeOOCreateMenu(){
+  const m = document.getElementById("ooCreateMenu");
+  if(m) m.classList.add("hidden");
+}
+// 点菜单外关闭；菜单项自身的 click 由 createOODoc 负责关闭，不冲突
+document.addEventListener("click", function(ev){
+  const m = document.getElementById("ooCreateMenu");
+  if(!m || m.classList.contains("hidden")) return;
+  const b = document.getElementById("btnOOCreate");
+  if(m.contains(ev.target) || (b && b.contains(ev.target))) return;
+  m.classList.add("hidden");
+});
+async function createOODoc(docType){
+  closeOOCreateMenu();
+  const label = _OO_CREATE_LABEL[docType] || "文档";
+  const btn = document.getElementById("btnOOCreate");
+  if(btn && btn.disabled) return;          // 防重复提交
+  if(btn) btn.disabled = true;
+  try{
+    const sel = document.getElementById("libColl");
+    const cid = (sel && sel.value) || "default";
+    const r = await fetch("/api/oo/create", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({doc_type:docType, cid:cid})
+    });
+    let j = {};
+    try{ j = await r.json(); }catch(e){}
+    if(!r.ok){ ocrToast("新建失败：" + (j.detail || r.status), "err"); return; }
+    ocrToast("已创建「" + (j.title || "未命名" + label) + "」，正在打开编辑器…", "ok");
+    const w = window.open("/office/edit?rid=" + encodeURIComponent(j.rid), "_blank");
+    if(!w) ocrToast("弹窗被浏览器拦截，请允许本站弹窗后重试", "warn");
+    // office 条目不属于 article，图文 tab 下会被 _filterByKind 过滤掉 → 切回「全部」再刷新
+    if(_libKind !== "all") switchTab("all"); else loadLibrary();
+  }catch(e){
+    ocrToast("新建失败：" + e.message, "err");
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+function _applyOOUI(){
+  const w = document.getElementById("ooCreateWrap");
+  if(w) w.classList.toggle("hidden", !_auth.oo_enabled);
 }
 function _kindTags(it){
   const art = _isArticle(it);
@@ -4380,6 +4476,7 @@ async function initAuth(){
     const r = await fetch("/api/bootstrap");
     if(r.ok) _auth = Object.assign(_auth, await r.json());
   }catch(e){ /* 取不到就按默认继续，不阻塞原有流程 */ }
+  _applyOOUI();                 // 新建文档入口随 oo_enabled 显隐（与「在线编辑」按钮同一开关）
   renderAuthBar();
   if(_auth.login_required){
     document.getElementById("loginMask").classList.remove("hidden");
