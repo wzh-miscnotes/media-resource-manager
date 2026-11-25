@@ -1354,7 +1354,7 @@ async function renderLibGrid(){
         <div class="sub">${dur}${subTag}${stale}</div>
         <div class="pv-row"><button class="pv-btn" title="${isArt?"在当前页面弹窗里阅读正文（不跳转）":"在当前页面弹窗里快速预览（不跳转）"}"
           onclick="event.stopPropagation();playLibItem(${i})">${isArt?"▢ 阅读正文":"▢ 弹窗预览"}</button>${isArt
-          ? `<button class="pv-btn" title="编辑这篇图文（归档文章派生副本，原文不动）" onclick="event.stopPropagation();openArtEditorForItem(currentCollItems()[${i}])">✎ 编辑</button>` : ""}</div>
+          ? `<button class="pv-btn" title="编辑这篇图文（归档文章派生副本，原文不动）" onclick="event.stopPropagation();openArtEditorForItem(currentCollItems()[${i}])">✎ 编辑</button>` : ""}${_ooBtn(it, i)}</div>
       </div>
       ${artBlock}
     </div>`;
@@ -1378,11 +1378,27 @@ async function renderLibGrid(){
 function _isArticle(it){
   return !!(it && (it.media_type === "article" || it.source_type === "wechat_article"));
 }
+/* ---- ONLYOFFICE 在线编辑入口（2026-11-25，默认关闭）----
+   仅当后端开关 oo_enabled=true、资源为 office 类型、且非共享只读时显示。
+   开关由 /api/bootstrap 下发，前端不配置任何密钥/地址。 */
+function _isOffice(it){
+  return !!(it && (it.media_type === "office" || it.source_type === "office"));
+}
+function _ooBtn(it, i){
+  if(!_auth.oo_enabled || !_isOffice(it) || it.shared) return "";
+  return `<button class="pv-btn" title="用 ONLYOFFICE 在线编辑（保存后派生新版本）" onclick="event.stopPropagation();openOnlyOffice(currentCollItems()[${i}])">✎ 在线编辑</button>`;
+}
+function openOnlyOffice(item){
+  if(!item || !item.resource_id){ alert("该资源缺少 resource_id，无法在线编辑"); return; }
+  window.open("/office/edit?rid=" + encodeURIComponent(item.resource_id), "_blank");
+}
 function _kindTags(it){
   const art = _isArticle(it);
   const big = art
     ? '<span class="kind-tag k-article">文章</span>'
-    : '<span class="kind-tag k-video">视频</span>';
+    : _isOffice(it)
+      ? '<span class="kind-tag k-article">文档</span>'
+      : '<span class="kind-tag k-video">视频</span>';
   const ct = art && it.content_type
     ? `<span class="kind-tag k-sub">${esc(it.content_type)}</span>` : "";
   const dt = art && it.published_at
@@ -4357,7 +4373,7 @@ async function doImportDir(){
                 admin 额外显示「用户管理」。
    auto       : 维持原行为，身份栏仅做展示。
    所有模式共用：身份串一律 <名>@local，保证存储键对齐、切换无损。 */
-let _auth = { auth_mode: "auto", identity: null, is_admin: false, login_required: false };
+let _auth = { auth_mode: "auto", identity: null, is_admin: false, login_required: false, oo_enabled: false };
 
 async function initAuth(){
   try{

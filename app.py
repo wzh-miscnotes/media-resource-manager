@@ -56,7 +56,7 @@ from pydantic import BaseModel
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
-from config import cfg, ADMIN_USER, ADMIN_PASSWORD, SECRET
+from config import cfg, ADMIN_USER, ADMIN_PASSWORD, SECRET, OO_JWT_SECRET, OO_SIGN_SECRET
 
 BIN = cfg["bin_dir"]                       # 内含 ffmpeg.exe（可选，缺省走三级回退）
 
@@ -80,6 +80,108 @@ ACCOUNTS_FILE = os.path.join(ACCOUNTS_DIR, ".accounts.json")
 
 # 会话签名密钥：未设 RM_SECRET 则每次启动随机生成（重启即登出，安全默认）
 _SIGN_SECRET = SECRET or secrets.token_hex(32)
+
+# ==================== ONLYOFFICE 集成开关（外部服务，默认关闭）====================
+# 2026-11-25：ONLYOFFICE 是独立部署的第三方文档服务，不属于 RM 项目。
+# 默认关闭；开启需管理员自行部署文档服务并设 RM_OO_ENABLED=1。
+# 关闭时：前端不显示编辑按钮，且 /office/edit + /api/oo/* 全部 404（不只是 UI 隐藏）。
+OO_ENABLED = bool(cfg.get("RM_OO_ENABLED", False))
+# 服务端下载/回调短期签名密钥：显式 RM_OO_SIGN_SECRET > RM_SECRET > 启动随机
+OO_SIGN_KEY = OO_SIGN_SECRET or SECRET or secrets.token_hex(32)
+# 文档服务反连 RM 的内网地址与可信网段：由部署方按实际网络配置（默认值仅示意，不写死内网拓扑）
+#  RM_OO_CALLBACK_HOST  : 文档服务用来访问 RM 的宿主地址（如 Docker 网桥网关 IP）
+#  RM_OO_TRUSTED_NET    : 允许反连的 CIDR（默认 Docker 常见网桥段，部署时按实际覆盖）
+OO_CALLBACK_HOST = (os.environ.get("RM_OO_CALLBACK_HOST") or "127.0.0.1").strip()
+OO_TRUSTED_NET = (os.environ.get("RM_OO_TRUSTED_NET") or "172.17.0.0/16").strip()
+# 编辑器 api.js 的对外地址（文档服务经网关暴露的域名）；部署方按实际覆盖
+OO_APIJS_BASE = (os.environ.get("RM_OO_APIJS_BASE") or "").strip().rstrip("/")
+
+def _oo_guard():
+    """ONLYOFFICE 接口总闸：未开启直接 404（对未部署者完全隐形）。"""
+    if not OO_ENABLED:
+        raise HTTPException(404, "未找到")
+
+def _oo_sign(payload: str, exp: int) -> str:
+    """RM 自签短期票：HMAC-SHA256(rid|exp|email)，用于内网下载/回调防滥用。"""
+    raw = f"{payload}|{exp}".encode("utf-8")
+    return hmac.new(OO_SIGN_KEY.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+
+def _oo_sig_ok(payload: str, exp: int, sig: str) -> bool:
+    if not sig or not exp or int(time.time()) > exp:
+        return False
+    return hmac.compare_digest(sig, _oo_sign(payload, exp))
+
+
+# ONLYOFFICE 版本/幂等状态：用户级 state 文件（gitignore 的 downloads/users/ 下）
+def _oo_state_path(sid):
+    return os.path.join(user_root(sid), ".oo_state.json")
+
+
+def _oo_state(sid):
+    return _read_json(_oo_state_path(sid))
+
+
+def _oo_version_get(sid, rid):
+    """取 rid 当前版本号；不存在视为 0（首次打开 → v1）。"""
+    v = (_oo_state(sid).get("versions") or {}).get(rid, 0)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _oo_version_bump(sid, rid):
+    """保存成功后 +1。不用 body_key8 目录数推算——旧版进回收站后计数会倒退。"""
+    d = _oo_state(sid)
+    versions = d.setdefault("versions", {})
+    versions[rid] = _oo_version_get(sid, rid) + 1
+    _write_json(_oo_state_path(sid), d)
+    return versions[rid]
+
+
+def _oo_key_seen(sid, key):
+    return key in ((_oo_state(sid).get("seen_keys") or {}))
+
+
+def _oo_mark_key(sid, key):
+    d = _oo_state(sid)
+    seen = d.setdefault("seen_keys", {})
+    seen[key] = int(time.time())
+    # 只保留最近 500 个 key，防止无限增长
+    if len(seen) > 500:
+        for k in sorted(seen, key=lambda x: seen[x])[:len(seen) - 500]:
+            seen.pop(k, None)
+    _write_json(_oo_state_path(sid), d)
+
+
+def _oo_dl_host_allowed(url: str) -> bool:
+    """callback 的 url 只允许来自 gw_net 内的文档服务容器（含宿主别名），防 SSRF。"""
+    import urllib.parse
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if host in ("localhost", "127.0.0.1"):
+        return True   # 隧道调试场景，_rewrite_dl_host 会把 host 重写回内网
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip in ipaddress.ip_network(OO_TRUSTED_NET, strict=False)
+    except ValueError:
+        # 域名形式：只放行文档服务容器名（Docker DNS），由部署方按实际命名覆盖
+        return host in ("onlyoffice-documentserver", OO_CALLBACK_HOST)
+
+
+def _rewrite_dl_host(url: str) -> str:
+    """SSH 隧道场景下文档服务回环地址重写为宿主 gw_net IP。"""
+    import urllib.parse
+    try:
+        p = urllib.parse.urlparse(url)
+        if p.hostname in ("localhost", "127.0.0.1"):
+            netloc = OO_CALLBACK_HOST + (f":{p.port}" if p.port else "")
+            return urllib.parse.urlunparse(p._replace(netloc=netloc))
+    except Exception:
+        pass
+    return url
 
 
 def normalize_identity(name: str) -> str:
@@ -229,6 +331,22 @@ SUB_EXTS  = (".srt", ".vtt", ".ass", ".lrc", ".txt")  # 字幕 / 文本衍生物
 IMG_EXTS  = (".jpg", ".jpeg", ".png", ".webp")          # 封面
 META_EXT  = (".json",)                                   # meta.json 衍生物（O3 解耦）
 
+# ONLYOFFICE 文档主资源（2026-11-25）：独立于视频的资源大类，默认集成关闭。
+# 注意 .txt/.json 已属 SUB_EXTS/META_EXT，不纳入本集合（避免上传分类被抢占）。
+OFFICE_EXT = (".docx", ".doc", ".odt", ".rtf",
+              ".xlsx", ".xls", ".ods", ".csv",
+              ".pptx", ".ppt", ".odp", ".pdf")
+# 扩展名 -> ONLYOFFICE documentType（word / cell / slide / pdf / diagram）
+OFFICE_TYPE_MAP = {
+    ".docx": "word", ".doc": "word", ".odt": "word", ".rtf": "word",
+    ".xlsx": "cell", ".xls": "cell", ".ods": "cell", ".csv": "cell",
+    ".pptx": "slide", ".ppt": "slide", ".odp": "slide",
+    ".pdf": "pdf",
+}
+# 主资源扩展名合集：凡「挑主文件 / 内容去重 / 池内主文件判定」处统一用它。
+# 之前这些点只写 MEDIA_EXT，导致 office 主资源入池后池内定位/去重全部失效。
+MAIN_EXT = MEDIA_EXT + OFFICE_EXT
+
 # 媒体类型推断（media_type 前瞻埋点，2026-10-22）：主体扩展名泛化，
 # 让资源池不仅认识「视频」，也能标记「音频 / 文字 / 图片」主体。
 VIDEO_EXT = (".mp4", ".mkv", ".webm", ".flv", ".mov")
@@ -236,7 +354,7 @@ AUDIO_EXT = (".m4a", ".mp3", ".aac")
 TEXT_EXT  = (".txt", ".srt", ".vtt", ".ass", ".lrc", ".xml")
 
 def media_type_of(path):
-    """由文件扩展名推断 media_type：video / audio / text / image / other。"""
+    """由文件扩展名推断 media_type：video / audio / text / image / office / other。"""
     ext = os.path.splitext(path or "")[1].lower()
     if ext in VIDEO_EXT:
         return "video"
@@ -246,6 +364,8 @@ def media_type_of(path):
         return "text"
     if ext in IMG_EXTS:
         return "image"
+    if ext in OFFICE_EXT:
+        return "office"
     return "other"
 
 def _norm_stem(stem):
@@ -672,6 +792,11 @@ def _entry_dedup_key(entry):
         _rid = (entry.get("resource_id") or "").strip()
         if _rid:
             return ("", "", "article:" + _rid)
+    # office 文档同理：按 resource_id 去重，标题改动不产生新条目（保证编辑回写复用同一 rid）
+    if _st == "office" or _mt == "office":
+        _rid = (entry.get("resource_id") or "").strip()
+        if _rid:
+            return ("", "", "office:" + _rid)
 
     m = re.match(r"^(\d{2,4})[\s._\-]", base)
     seq = m.group(1) if m else ""
@@ -714,7 +839,7 @@ def _pool_main_lookup(pool_dir):
         fp = os.path.join(pool_dir, fn)
         if not os.path.isfile(fp):
             continue
-        if fn.lower().endswith(MEDIA_EXT):
+        if fn.lower().endswith(MAIN_EXT):
             media.append(fp)
         elif fn.lower().endswith(SIDE_EXT):
             side.append(os.path.relpath(fp, DOWNLOADS))
@@ -1356,6 +1481,63 @@ def serve_file(name: str, share: str = None, sid: str = Depends(current_identity
         raise HTTPException(404, "文件不存在")
     return FileResponse(path, filename=os.path.basename(path))
 
+
+# ==================== ONLYOFFICE 服务端接口（默认关闭）====================
+# 由文档服务容器服务端发起，不带浏览器 cookie —— 鉴权靠「可信网段 + 短期 HMAC 签名」。
+# 与 /api/files/{name:path} 的 share 分支完全隔离，不放宽其 sid 闸门。
+_OO_MIME = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".rtf": "application/rtf",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".csv": "text/csv; charset=utf-8",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
+    ".pdf": "application/pdf",
+}
+
+
+def _oo_main_path(owner, rid):
+    """定位某用户合集中 rid 的主文件绝对路径；找不到返回 None。
+    匹配口径与 _find_resource 一致走 _rid_of_item：
+    条目的 resource_id 与 rel_path 里的 rid 可能因内容去重而不一致，
+    因此只按条目引用取 rel_path，不强行要求 rel_path 片段等于传入 rid。"""
+    for c in _sid_collections(owner):
+        if c.get("id") == "__trash__":
+            continue
+        for it in c.get("items", []):
+            if _rid_of_item(it) != rid:
+                continue
+            rp = (it.get("rel_path") or "").replace("\\", "/")
+            if not rp.startswith("resources/") or os.path.splitext(rp)[1].lower() not in OFFICE_EXT:
+                continue
+            p = os.path.abspath(os.path.join(DOWNLOADS, rp))
+            if p.startswith(os.path.abspath(DOWNLOADS)) and os.path.isfile(p):
+                return p
+    return None
+
+
+@app.get("/api/oo/file")
+def oo_file(rid: str, exp: int = 0, sig: str = "", sid: str = Depends(current_identity)):
+    """文档服务端下载：可信网段注入的 X-User-Email 定位 owner，rid 签名防滥用。"""
+    _oo_guard()
+    if not sid:
+        raise HTTPException(403, "需登录")
+    if not _oo_sig_ok(f"{rid}|{sid}", exp, sig):
+        raise HTTPException(403, "签名无效或已过期")
+    path = _oo_main_path(sid, rid)
+    if not path:
+        raise HTTPException(404, "资源不存在")
+    if os.path.getsize(path) > 50 * 1024 * 1024:   # ONLYOFFICE 单文件硬限制
+        raise HTTPException(413, "文件超过 50MB 限制")
+    ext = os.path.splitext(path)[1].lower()
+    return FileResponse(path, media_type=_OO_MIME.get(ext, "application/octet-stream"))
+
+
 @app.get("/api/thumbnail-cache/{name:path}")
 def serve_thumbnail_cache(name: str):
     """提供解析时缓存的本地封面图（避免 CDN 防盗链）。"""
@@ -1431,7 +1613,91 @@ def bootstrap(request: Request):
         "identity": sid,
         "is_admin": bool(sid) and sid == normalize_identity(ADMIN_USER),
         "login_required": AUTH_MODE == "standalone" and not sid,
+        "oo_enabled": OO_ENABLED,   # ONLYOFFICE 集成开关（默认 false，前端据此显隐编辑按钮）
     }
+
+
+def _oo_jwt(payload: dict) -> str:
+    """ONLYOFFICE config 签名（HS256，零依赖手写，与契约一致）。"""
+    def b64(b):
+        return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+    header = b64(b'{"alg":"HS256","typ":"JWT"}')
+    body = b64(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    unsigned = header + "." + body
+    signature = b64(hmac.new(OO_JWT_SECRET.encode("utf-8"), unsigned.encode("ascii"),
+                             hashlib.sha256).digest())
+    return unsigned + "." + signature
+
+
+@app.get("/office/edit", response_class=HTMLResponse, include_in_schema=False)
+def office_edit(request: Request, rid: str = ""):
+    """ONLYOFFICE 编辑入口页（默认关闭）。config + JWT 由服务端生成，密钥不下发浏览器。"""
+    _oo_guard()
+    sid = current_identity(request)
+    if not sid:
+        raise HTTPException(401, "需登录")
+    if not OO_JWT_SECRET:
+        raise HTTPException(503, "文档服务未配置 JWT 密钥")
+    path = _oo_main_path(sid, rid)
+    if not path:
+        raise HTTPException(404, "资源不存在或不可编辑")
+    ext = os.path.splitext(path)[1].lower()
+    doc_type = OFFICE_TYPE_MAP.get(ext)
+    if not doc_type:
+        raise HTTPException(400, "该文档类型不支持在线编辑")
+    # 共享只读：rid 出现在他人分享条目中则拒绝编辑
+    for c in _sid_collections(sid):
+        for it in c.get("items", []):
+            if _rid_of_item(it) == rid and it.get("shared"):
+                raise HTTPException(403, "共享资源只读")
+
+    version = _oo_version_get(sid, rid) + 1
+    key = f"{rid}_v{version}"
+    exp = int(time.time()) + 3600
+    sig = _oo_sign(f"{rid}|{sid}", exp)
+    cb_sig = _oo_sign(f"cb|{key}|{sid}", exp)
+    title = os.path.splitext(os.path.basename(path))[0]
+    # 文件/回调 URL 走内网：文档服务容器可直连宿主 gw_net IP
+    _cb_base = f"http://{OO_CALLBACK_HOST}:{cfg['port']}"
+    file_url = f"{_cb_base}/api/oo/file?rid={urllib.parse.quote(rid)}&exp={exp}&sig={sig}"
+    cb_url = (f"{_cb_base}/api/oo/callback?key={urllib.parse.quote(key)}"
+              f"&email={urllib.parse.quote(sid)}&exp={exp}&sig={cb_sig}")
+    config = {
+        "documentType": doc_type,
+        "document": {
+            "fileType": ext.lstrip("."),
+            "key": key,
+            "title": title,
+            "url": file_url,
+            "permissions": {"edit": True},
+        },
+        "editorConfig": {
+            "callbackUrl": cb_url,
+            "user": {"id": sid, "name": sid},
+            "customization": {"autosave": False},
+        },
+    }
+    if not OO_APIJS_BASE:
+        raise HTTPException(503, "未配置文档服务编辑器地址（RM_OO_APIJS_BASE）")
+    token = _oo_jwt(config)
+    cfg_js = json.dumps(config, ensure_ascii=False).replace("</", "<\\/")
+    _api_js = OO_APIJS_BASE + "/web-apps/apps/api/documents/api.js"
+    # api.js 从文档服务域加载；config/token 由本页注入，浏览器不接触密钥
+    return HTMLResponse(f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>编辑 - {html_escape(title)}</title>
+<style>body{{margin:0;background:#f5f6f8}}#editor{{width:100vw;height:100vh}}</style>
+</head><body><div id="editor"></div>
+<script src="{_api_js}"></script>
+<script>
+var cfg = {cfg_js};
+cfg.token = {json.dumps(token)};
+new DocsAPI.DocEditor("editor", cfg);
+</script></body></html>""")
+
+
+def html_escape(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 class LoginReq(BaseModel):
@@ -2373,7 +2639,7 @@ def move_items(cid: str, req: MoveItemsReq, sid: str = Depends(current_identity)
 def _prune_orphan_dirs(dirs, sid=None):
     """清理已无媒体文件的任务目录（连带封面 / 孤立字幕 / 目录骨架）。
 
-    仅当目录内不再残留任何 MEDIA_EXT 媒体文件时才整目录删除，
+    仅当目录内不再残留任何主文件（MEDIA_EXT 媒体 / OFFICE_EXT 文档）时才整目录删除，
     避免误删同批次其它分P。严格限制在用户自己的根目录内。
     """
     pruned = []
@@ -2389,7 +2655,7 @@ def _prune_orphan_dirs(dirs, sid=None):
             continue
         try:
             remain_media = any(
-                fn.lower().endswith(MEDIA_EXT)
+                fn.lower().endswith(MAIN_EXT)
                 for fn in os.listdir(d)
                 if os.path.isfile(os.path.join(d, fn))
             )
@@ -2489,18 +2755,21 @@ async def upload_files(
     """从浏览器上传本地视频（及其字幕），按「内容哈希 rid + 内容派生 body_key8」直接入资源池；
     走 _add_to_collection 登记合集引用，删除引用归零即入 __trash__（与资源池条目同保护）。
     见 RM-实施指引 §2.2。内容级去重由 _ingest_into_pool 保证（同内容只存一份）。"""
-    videos, subs, covers, metas = [], [], [], []
+    videos, subs, covers, metas, offices = [], [], [], [], []
     for f in files:
         ext = os.path.splitext(f.filename or "")[1].lower()
         if ext in MEDIA_EXT:
             videos.append(f)
+        elif ext in OFFICE_EXT:
+            # office 文档是独立主资源（不参与视频字幕主干配对），与视频同链路各自入池
+            offices.append(f)
         elif ext in SUB_EXTS:
             subs.append(f)
         elif ext in IMG_EXTS:
             covers.append(f)
         elif ext in META_EXT:
             metas.append(f)
-        # 其它类型静默忽略（仅处理媒体 / 字幕 / 封面 / meta）
+        # 其它类型静默忽略（仅处理媒体 / 文档 / 字幕 / 封面 / meta）
 
     # 暂存到用户级 staging，再由 _ingest_into_pool 迁入资源池（staging 会被消费）
     stage_dir = os.path.join(user_root(sid), "_staging")
@@ -2552,6 +2821,27 @@ async def upload_files(
             added += 1
             # 视频入池后，把此前先到、暂存于 pending 的字幕 / 封面 / meta 补挂进来
             _flush_pending_attach(sid, rid, body_key8, stem)
+        except HTTPException:
+            pass
+
+    # ONLYOFFICE 文档：各自按内容哈希派生 rid，独立入池（不配对字幕/封面）
+    for f in offices:
+        try:
+            data = await f.read()
+        except Exception:
+            continue
+        h = hashlib.sha256(data).hexdigest()
+        rid = "r" + h[:15]
+        body_key8 = _body_key8_from_hash(h)
+        safe = _safe_upload_name(f.filename)
+        dest = _uniq_path(os.path.join(stage_dir, safe))
+        with open(dest, "wb") as w:
+            w.write(data)
+        try:
+            _ingest_into_pool(sid, rid, body_key8, dest, [],
+                              _title_from_filename(f.filename), target_cid=cid,
+                              content_sha256=h, source_type="office")
+            added += 1
         except HTTPException:
             pass
 
@@ -3120,6 +3410,79 @@ def article_save(req: ArticleSaveReq, sid: str = Depends(current_identity)):
         published_at=req.published_at, content_type=req.content_type)
     return {"ok": True, "rid": out_rid, "rel_path": rel, "dedup": dedup,
             "replaced_rel_path": replaced or ""}
+
+
+@app.post("/api/oo/callback")
+async def oo_callback(req: dict, sid: str = Depends(current_identity)):
+    """ONLYOFFICE 保存回调（默认关闭）。
+    仅 status 2/6 落盘；签名 + host 白名单双闸门；按 document.key 幂等；
+    回写走 _ingest_into_pool 派生新版本（旧版自动进回收站）。
+    ⚠️ 无论成功失败都必须返回 {"error":0}，非 0 编辑器判定保存失败。"""
+    _oo_guard()
+    import urllib.request
+    status = req.get("status")
+    key = str(req.get("key") or "")
+    if status not in (2, 6) or not req.get("url"):
+        return {"error": 0}   # 非保存态（1=编辑中/3=错误）只忽略
+
+    # 身份：文档服务从可信网段带 X-User-Email；callbackUrl query 也带 email 兜底
+    owner = sid or str(req.get("email") or "").strip()
+    if not owner:
+        return {"error": 0}
+    exp = int(req.get("exp") or 0)
+    sig = str(req.get("sig") or "")
+    if not _oo_sig_ok(f"cb|{key}|{owner}", exp, sig):
+        return {"error": 0}
+    if _oo_key_seen(owner, key):
+        return {"error": 0}
+
+    dl_url = str(req.get("url") or "")
+    if not _oo_dl_host_allowed(dl_url):
+        return {"error": 0}
+
+    # rid 从 key 解析：<rid>_v<version>
+    rid = key.rsplit("_v", 1)[0] if "_v" in key else ""
+    if not rid:
+        return {"error": 0}
+    # 取原资源标题（找不到就退化成 rid 本身）
+    title = rid
+    for c in _sid_collections(owner):
+        for it in c.get("items", []):
+            if _rid_of_item(it) == rid:
+                title = it.get("title") or rid
+                break
+        else:
+            continue
+        break
+
+    try:
+        with urllib.request.urlopen(_rewrite_dl_host(dl_url), timeout=60) as r:
+            raw = r.read()
+        if len(raw) > 50 * 1024 * 1024:
+            return {"error": 0}
+        h = hashlib.sha256(raw).hexdigest()
+        body_key8 = _body_key8_from_hash(h)
+        # 扩展名从原资源 rel_path 推断，保持源格式（不写死 .xlsx）
+        ext = ".docx"
+        for rel in _resource_paths(owner, rid):
+            e = os.path.splitext(rel)[1].lower()
+            if e in OFFICE_EXT:
+                ext = e
+                break
+        stage_dir = os.path.join(user_root(owner), "_staging")
+        os.makedirs(stage_dir, exist_ok=True)
+        staged = _uniq_path(os.path.join(stage_dir, "oo_" + h[:10] + ext))
+        with open(staged, "wb") as w:
+            w.write(raw)
+        _ingest_into_pool(owner, rid, body_key8, staged, [], title,
+                          target_cid="default", content_sha256=h, source_type="office")
+        _oo_mark_key(owner, key)
+        _oo_version_bump(owner, rid)
+    except Exception:
+        # 失败也回 0，避免编辑器反复重试；日志留痕便于排查
+        pass
+    return {"error": 0}
+
 
 LLM_BASE_URL = str(cfg.get("llm_base_url") or "").rstrip("/")
 
@@ -4754,7 +5117,7 @@ def _find_identical_media(pool_dir, content_sha256):
     if not content_sha256 or not os.path.isdir(pool_dir):
         return None
     for fn in os.listdir(pool_dir):
-        if not fn.lower().endswith(MEDIA_EXT):
+        if not fn.lower().endswith(MAIN_EXT):
             continue
         p = os.path.join(pool_dir, fn)
         if os.path.isfile(p) and _sha256_of_file(p) == content_sha256:
@@ -4774,7 +5137,7 @@ def _pick_main_media_in_dir(d, prefer_html=False):
                 return os.path.join(d, fn)
     best, best_sz = None, -1
     for fn in os.listdir(d):
-        if fn.lower().endswith(MEDIA_EXT) and os.path.isfile(os.path.join(d, fn)):
+        if fn.lower().endswith(MAIN_EXT) and os.path.isfile(os.path.join(d, fn)):
             sz = os.path.getsize(os.path.join(d, fn))
             if sz > best_sz:
                 best_sz, best = sz, os.path.join(d, fn)
@@ -5374,7 +5737,7 @@ def import_dir(req: ImportDirReq, sid: str = Depends(current_identity)):
         for fn in fnames:
             ext = os.path.splitext(fn)[1].lower()
             fp = os.path.join(root, fn)
-            if ext in MEDIA_EXT:
+            if ext in MAIN_EXT:
                 media_files.append(fp)
             elif ext in SIDE_EXT and not fn.endswith(".meta.json"):
                 # 排除 inbox watcher 的组锚文件，避免被当 sidecar 误传/污染资源池
@@ -5425,9 +5788,10 @@ def import_dir(req: ImportDirReq, sid: str = Depends(current_identity)):
             except OSError:
                 pass
         try:
+            _src_type = "office" if mp.lower().endswith(OFFICE_EXT) else "video"
             _ingest_into_pool(owner, rid, body_key8, dest, extras,
                               _title_from_filename(mp), target_cid=req.target_cid,
-                              content_sha256=content_sha256)
+                              content_sha256=content_sha256, source_type=_src_type)
             added += 1
         except HTTPException:
             skipped += 1

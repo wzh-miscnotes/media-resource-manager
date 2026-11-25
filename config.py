@@ -69,6 +69,8 @@ DEFAULTS = {
     "RM_INBOX_POLL_SEC": 10,                 # 扫描间隔（秒）
     "RM_INBOX_DEFAULT_OWNER": "admin@local", # meta 缺失时的兜底 owner
     "RM_INBOX_MAX_RETRY": 5,                 # 同组失败重试上限，超过移 .failed/
+    # ---- ONLYOFFICE 集成（默认关闭；外部服务，不属于本项目）----
+    "RM_OO_ENABLED": False,                  # 总开关；开启需自行部署 ONLYOFFICE 文档服务
 }
 
 # 环境变量名映射（统一前缀 RM_，避免与系统变量冲突）
@@ -89,12 +91,19 @@ ENV_MAP = {
     "RM_INBOX_POLL_SEC": "RM_INBOX_POLL_SEC",
     "RM_INBOX_DEFAULT_OWNER": "RM_INBOX_DEFAULT_OWNER",
     "RM_INBOX_MAX_RETRY": "RM_INBOX_MAX_RETRY",
+    # ---- ONLYOFFICE 集成 ----
+    "RM_OO_ENABLED": "RM_OO_ENABLED",
 }
 
 # ---- 机密项：只认环境变量，绝不从 config.json 读取（config.json 可能被误提交）----
 ADMIN_USER = (os.environ.get("RM_ADMIN_USER") or "admin").strip() or "admin"      # 身份串 = <名>@local
 ADMIN_PASSWORD = (os.environ.get("RM_ADMIN_PASSWORD") or "").strip()              # 空 = 首启自动生成
 SECRET = (os.environ.get("RM_SECRET") or "").strip()                              # 空 = 启动时随机生成
+# ONLYOFFICE 集成的 JWT 密钥：只从环境变量读，绝不进 config.json（同上机密项纪律）
+# 须与文档服务容器的 JWT_SECRET 完全一致，否则编辑器白屏。
+OO_JWT_SECRET = (os.environ.get("RM_OO_JWT_SECRET") or "").strip()
+# 服务端下载/回调签名密钥（RM 自签短期 sig，防裸端口被滥用）；未设则回退到 RM_SECRET / 启动随机
+OO_SIGN_SECRET = (os.environ.get("RM_OO_SIGN_SECRET") or "").strip()
 
 
 def _load_json() -> dict:
@@ -124,6 +133,9 @@ def load_config() -> dict:
                     val = int(val)
                 except ValueError:
                     continue
+            elif k == "RM_OO_ENABLED":
+                # 布尔开关：1/true/yes/on 视为开启，其余一律关闭（默认安全）
+                val = str(val).strip().lower() in ("1", "true", "yes", "on")
             cfg[k] = val
     return cfg
 
