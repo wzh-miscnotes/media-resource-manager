@@ -97,11 +97,20 @@ OO_CALLBACK_HOST = (os.environ.get("RM_OO_CALLBACK_HOST") or "127.0.0.1").strip(
 OO_TRUSTED_NET = (os.environ.get("RM_OO_TRUSTED_NET") or "172.17.0.0/16").strip()
 # 编辑器 api.js 的对外地址（文档服务经网关暴露的域名）；部署方按实际覆盖
 OO_APIJS_BASE = (os.environ.get("RM_OO_APIJS_BASE") or "").strip().rstrip("/")
+# 文档服务「RM 可达」的内部地址（保存回调时抓 /cache/files/... 用），如 http://127.0.0.1:8082
+# 与 OO_APIJS_BASE 是同一个服务的两个入口：浏览器走公网域名，RM 走回环端口，不能混用。
+OO_INTERNAL_BASE = (os.environ.get("RM_OO_INTERNAL_BASE") or "").strip().rstrip("/")
 
 def _oo_guard():
     """ONLYOFFICE 接口总闸：未开启直接 404（对未部署者完全隐形）。"""
     if not OO_ENABLED:
         raise HTTPException(404, "未找到")
+
+
+def _oo_warn(msg, key=""):
+    """ONLYOFFICE 相关告警：回调失败必须留痕，否则编辑器侧只看到"保存了"、库里没变。"""
+    if OO_ENABLED:
+        print(f"[oo] {msg}" + (f" (key={key})" if key else ""), flush=True)
 
 def _oo_sign(payload: str, exp: int) -> str:
     """RM 自签短期票：HMAC-SHA256(rid|exp|email)，用于内网下载/回调防滥用。"""
@@ -156,34 +165,67 @@ def _oo_mark_key(sid, key):
     _write_json(_oo_state_path(sid), d)
 
 
+def _oo_docservice_hosts():
+    """「文档服务自身」的已知主机名（小写）：既用于 SSRF 白名单，也用于内网地址重写。
+
+    为什么要收集多个：浏览器侧只能访问公网域名（OO_APIJS_BASE），
+    而回调 url 里的 host 就是文档服务的 baseurl —— 它会随访问入口变化：
+    公网域名（正常部署）/ 容器名（未透传 X-Forwarded-* 时）/ 127.0.0.1（SSH 隧道调试）。
+    """
+    import urllib.parse
+    hosts = {"onlyoffice-documentserver", "localhost", "127.0.0.1"}
+    for u in (OO_APIJS_BASE, OO_INTERNAL_BASE):
+        if not u:
+            continue
+        h = (urllib.parse.urlparse(u).hostname or "").lower()
+        if h:
+            hosts.add(h)
+    return hosts
+
+
+def _oo_is_trusted_ip(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host) in ipaddress.ip_network(OO_TRUSTED_NET, strict=False)
+    except ValueError:
+        return False
+
+
 def _oo_dl_host_allowed(url: str) -> bool:
-    """callback 的 url 只允许来自 gw_net 内的文档服务容器（含宿主别名），防 SSRF。"""
+    """callback 的 url 只允许指向文档服务自身或其所在可信网段，防 SSRF。"""
     import urllib.parse
     try:
         host = (urllib.parse.urlparse(url).hostname or "").lower()
     except Exception:
         return False
-    if host in ("localhost", "127.0.0.1"):
-        return True   # 隧道调试场景，_rewrite_dl_host 会把 host 重写回内网
-    try:
-        ip = ipaddress.ip_address(host)
-        return ip in ipaddress.ip_network(OO_TRUSTED_NET, strict=False)
-    except ValueError:
-        # 域名形式：只放行文档服务容器名（Docker DNS），由部署方按实际命名覆盖
-        return host in ("onlyoffice-documentserver", OO_CALLBACK_HOST)
+    if not host:
+        return False
+    return host in _oo_docservice_hosts() or _oo_is_trusted_ip(host)
 
 
 def _rewrite_dl_host(url: str) -> str:
-    """SSH 隧道场景下文档服务回环地址重写为宿主 gw_net IP。"""
+    """把回调下载地址重写到「RM 自己够得着」的文档服务地址。
+
+    典型部署里三方网络各不相同：
+      · 浏览器 → 文档服务：公网域名（OO_APIJS_BASE，经网关反代）
+      · 文档服务 → RM：宿主 gw_net IP（OO_CALLBACK_HOST）
+      · RM → 文档服务：RM 常以 host 网络运行，既解析不了容器名、也连不上未发布的 80
+    所以 callback url（其 host 来自文档服务 baseurl）必须改写成 RM_OO_INTERNAL_BASE
+    （如 http://127.0.0.1:8082，文档服务只绑回环的宿主端口）。未配置该项则原样返回。
+    """
     import urllib.parse
+    if not OO_INTERNAL_BASE:
+        return url
     try:
         p = urllib.parse.urlparse(url)
-        if p.hostname in ("localhost", "127.0.0.1"):
-            netloc = OO_CALLBACK_HOST + (f":{p.port}" if p.port else "")
-            return urllib.parse.urlunparse(p._replace(netloc=netloc))
+        host = (p.hostname or "").lower()
+        if not (host in _oo_docservice_hosts() or _oo_is_trusted_ip(host)):
+            return url
+        t = urllib.parse.urlparse(OO_INTERNAL_BASE)
+        if not t.netloc:
+            return url
+        return urllib.parse.urlunparse(p._replace(scheme=t.scheme or "http", netloc=t.netloc))
     except Exception:
-        pass
-    return url
+        return url
 
 
 # ============ ONLYOFFICE 新建：内置最小空白模板（零外部依赖，2026-11-25）============
@@ -1762,14 +1804,24 @@ def _oo_main_path(owner, rid):
 
 
 @app.get("/api/oo/file")
-def oo_file(rid: str, exp: int = 0, sig: str = "", sid: str = Depends(current_identity)):
-    """文档服务端下载：可信网段注入的 X-User-Email 定位 owner，rid 签名防滥用。"""
+def oo_file(rid: str, exp: int = 0, sig: str = "", email: str = "",
+            sid: str = Depends(current_identity)):
+    """文档服务端下载：owner 取「请求身份 or query email」，rid+owner 签名防滥用。
+
+    为什么不能只靠 current_identity：ONLYOFFICE 服务端拉文件是纯服务端请求，
+    不带 X-User-Email / X-Session-Id，identity 必为空。因此 owner 走 query，
+    并由 sig 绑定（sig = HMAC("rid|owner")），伪造 email 会验签失败。
+    """
     _oo_guard()
-    if not sid:
+    email = (email or "").strip()
+    if sid and email and normalize_identity(sid) != normalize_identity(email):
+        raise HTTPException(403, "身份与签名归属不一致")
+    owner = sid or email
+    if not owner:
         raise HTTPException(403, "需登录")
-    if not _oo_sig_ok(f"{rid}|{sid}", exp, sig):
+    if not _oo_sig_ok(f"{rid}|{owner}", exp, sig):
         raise HTTPException(403, "签名无效或已过期")
-    path = _oo_main_path(sid, rid)
+    path = _oo_main_path(owner, rid)
     if not path:
         raise HTTPException(404, "资源不存在")
     if os.path.getsize(path) > 50 * 1024 * 1024:   # ONLYOFFICE 单文件硬限制
@@ -1899,7 +1951,10 @@ def office_edit(request: Request, rid: str = ""):
     title = os.path.splitext(os.path.basename(path))[0]
     # 文件/回调 URL 走内网：文档服务容器可直连宿主 gw_net IP
     _cb_base = f"http://{OO_CALLBACK_HOST}:{cfg['port']}"
-    file_url = f"{_cb_base}/api/oo/file?rid={urllib.parse.quote(rid)}&exp={exp}&sig={sig}"
+    # email 必须一并带上：文档服务端拉文件时不带任何身份头，owner 只能靠 query 传（与 callback 同口径），
+    # 且 owner 已绑进 sig，改 email 会验签失败，不存在越权读取他人文件。
+    file_url = (f"{_cb_base}/api/oo/file?rid={urllib.parse.quote(rid)}"
+                f"&email={urllib.parse.quote(sid)}&exp={exp}&sig={sig}")
     cb_url = (f"{_cb_base}/api/oo/callback?key={urllib.parse.quote(key)}"
               f"&email={urllib.parse.quote(sid)}&exp={exp}&sig={cb_sig}")
     config = {
@@ -1925,7 +1980,10 @@ def office_edit(request: Request, rid: str = ""):
     # api.js 从文档服务域加载；config/token 由本页注入，浏览器不接触密钥
     return HTMLResponse(f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>编辑 - {html_escape(title)}</title>
-<style>body{{margin:0;background:#f5f6f8}}#editor{{width:100vw;height:100vh}}</style>
+<!-- 高度必须给到 html/body：api.js 会把握手用的占位 div 替换成 <iframe height="100%">，
+     直接挂在 body 下。若只给 #editor 定高，iframe 的 100% 无处可依 → 退回默认 150px，
+     表现为编辑器被压成一条、下方一片空白。 -->
+<style>html,body{{margin:0;height:100%;background:#f5f6f8}}#editor{{width:100%;height:100%}}</style>
 </head><body><div id="editor"></div>
 <script src="{_api_js}"></script>
 <script>
@@ -2961,6 +3019,10 @@ def delete_files(req: DeleteFilesReq, sid: str = Depends(current_identity)):
         touched_dirs = []
         own_prefix = "users/" + user_hash(sid) + "/"
         for ent in (req.items or []):
+            # 每轮重新取 cols：循环体内 ensure_trash_entry 会保存并可能触发缓存重载，
+            # 之后旧的 cols 就与 _collections_cache 脱钩 —— 后续条目会"删了个寂寞"
+            # （批量删除只生效第一条的根因）。
+            cols = _sid_collections(sid)
             rel = (ent.get("rel_path") if isinstance(ent, dict) else str(ent)).strip()
             sub = (ent.get("subtitle", "") if isinstance(ent, dict) else "").strip()
             if not rel:
@@ -3693,36 +3755,46 @@ def article_save(req: ArticleSaveReq, sid: str = Depends(current_identity)):
 
 
 @app.post("/api/oo/callback")
-async def oo_callback(req: dict, sid: str = Depends(current_identity)):
+async def oo_callback(req: dict, request: Request, sid: str = Depends(current_identity)):
     """ONLYOFFICE 保存回调（默认关闭）。
     仅 status 2/6 落盘；签名 + host 白名单双闸门；按 document.key 幂等；
     回写走 _ingest_into_pool 派生新版本（旧版自动进回收站）。
-    ⚠️ 无论成功失败都必须返回 {"error":0}，非 0 编辑器判定保存失败。"""
+    ⚠️ 无论成功失败都必须返回 {"error":0}，非 0 编辑器判定保存失败。
+
+    ⚠️ 归属/签名参数在 **query** 上，不在 body 里：文档服务回调是把 callbackUrl
+    原样 POST（body 只有 status/url/key 等编辑器字段），所以 email/exp/sig 必须从
+    request.query_params 读。曾只读 body 导致 owner 恒空 → 保存永远静默丢弃。
+    """
     _oo_guard()
     import urllib.request
+    q = request.query_params
     status = req.get("status")
-    key = str(req.get("key") or "")
+    key = str(req.get("key") or q.get("key") or "")
     if status not in (2, 6) or not req.get("url"):
         return {"error": 0}   # 非保存态（1=编辑中/3=错误）只忽略
 
-    # 身份：文档服务从可信网段带 X-User-Email；callbackUrl query 也带 email 兜底
-    owner = sid or str(req.get("email") or "").strip()
+    # 身份：文档服务从可信网段带 X-User-Email；未走网关时靠 callbackUrl query 的 email 兜底
+    owner = sid or (q.get("email") or "").strip() or str(req.get("email") or "").strip()
     if not owner:
+        _oo_warn("callback 无 owner", key)
         return {"error": 0}
-    exp = int(req.get("exp") or 0)
-    sig = str(req.get("sig") or "")
+    exp = int(req.get("exp") or q.get("exp") or 0)
+    sig = str(req.get("sig") or q.get("sig") or "")
     if not _oo_sig_ok(f"cb|{key}|{owner}", exp, sig):
+        _oo_warn("callback 验签失败（可能 RM 重启换了签名密钥或已过期）", key)
         return {"error": 0}
     if _oo_key_seen(owner, key):
         return {"error": 0}
 
     dl_url = str(req.get("url") or "")
     if not _oo_dl_host_allowed(dl_url):
+        _oo_warn("callback 下载地址不在可信主机白名单: " + dl_url.split("?")[0], key)
         return {"error": 0}
 
     # rid 从 key 解析：<rid>_v<version>
     rid = key.rsplit("_v", 1)[0] if "_v" in key else ""
     if not rid:
+        _oo_warn("callback key 不含 _v<版本>", key)
         return {"error": 0}
     # 取原资源标题（找不到就退化成 rid 本身）
     title = rid
@@ -3736,9 +3808,11 @@ async def oo_callback(req: dict, sid: str = Depends(current_identity)):
         break
 
     try:
-        with urllib.request.urlopen(_rewrite_dl_host(dl_url), timeout=60) as r:
+        _dl = _rewrite_dl_host(dl_url)
+        with urllib.request.urlopen(_dl, timeout=60) as r:
             raw = r.read()
         if len(raw) > 50 * 1024 * 1024:
+            _oo_warn("回写文件超过 50MB，已忽略", key)
             return {"error": 0}
         h = hashlib.sha256(raw).hexdigest()
         body_key8 = _body_key8_from_hash(h)
@@ -3751,16 +3825,19 @@ async def oo_callback(req: dict, sid: str = Depends(current_identity)):
                 break
         stage_dir = os.path.join(user_root(owner), "_staging")
         os.makedirs(stage_dir, exist_ok=True)
-        staged = _uniq_path(os.path.join(stage_dir, "oo_" + h[:10] + ext))
+        # 落盘文件名沿用资源标题：用 oo_<hash> 命名会让池内文件名（进而编辑器标题栏、
+        # 下载名）在每次保存后变成一串哈希，用户看不出这是自己那份文档。
+        staged = _uniq_path(os.path.join(stage_dir, _safe_upload_name((title or rid) + ext)))
         with open(staged, "wb") as w:
             w.write(raw)
         _ingest_into_pool(owner, rid, body_key8, staged, [], title,
                           target_cid="default", content_sha256=h, source_type="office")
         _oo_mark_key(owner, key)
         _oo_version_bump(owner, rid)
-    except Exception:
-        # 失败也回 0，避免编辑器反复重试；日志留痕便于排查
-        pass
+        print(f"[oo] 已回写 {len(raw)}B <- {key}", flush=True)
+    except Exception as e:
+        # 失败也回 0（非 0 编辑器会判定保存失败并反复重试）；但必须留痕，否则"存了没变"查无实据
+        _oo_warn(f"回写失败: {type(e).__name__}: {e} | url={_rewrite_dl_host(dl_url)}", key)
     return {"error": 0}
 
 
