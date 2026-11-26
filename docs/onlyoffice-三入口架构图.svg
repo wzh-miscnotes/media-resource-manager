@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="410" viewBox="0 0 680 410" font-family="'Microsoft YaHei', 'PingFang SC', sans-serif">
+  <rect width="680" height="410" fill="#ffffff"/>
+
+  <rect x="240" y="40" width="200" height="48" rx="8" fill="#ffffff" stroke="#d0d5dd" stroke-width="1"/>
+  <text x="340" y="64" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#1f2937">用户浏览器</text>
+
+  <line x1="340" y1="88" x2="340" y2="114" stroke="#6b7280" stroke-width="1.5"/>
+  <polygon points="334,112 346,112 340,124" fill="#6b7280"/>
+  <text x="350" y="106" dominant-baseline="central" font-size="12" fill="#4b5563">① 加载 api.js、渲染编辑器</text>
+
+  <rect x="250" y="130" width="180" height="44" rx="8" fill="#ffffff" stroke="#d0d5dd" stroke-width="1"/>
+  <text x="340" y="152" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#1f2937">反向代理 Caddy / Nginx</text>
+
+  <line x1="340" y1="174" x2="340" y2="190" stroke="#6b7280" stroke-width="1.5"/>
+  <polygon points="334,188 346,188 340,200" fill="#6b7280"/>
+  <text x="350" y="188" dominant-baseline="central" font-size="12" fill="#4b5563">HTTP 与 WS 都要补转发头</text>
+
+  <rect x="220" y="206" width="240" height="56" rx="8" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="340" y="226" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#4c1d95">ONLYOFFICE Docs</text>
+  <text x="340" y="246" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#6d28d9">容器 · JWT 启用 · 9.4.0</text>
+
+  <line x1="300" y1="262" x2="300" y2="306" stroke="#6b7280" stroke-width="1.5"/>
+  <polygon points="294,304 306,304 300,316" fill="#6b7280"/>
+  <text x="292" y="284" text-anchor="end" dominant-baseline="central" font-size="12" fill="#4b5563">② 拉文件 / 回调</text>
+
+  <line x1="380" y1="316" x2="380" y2="274" stroke="#6b7280" stroke-width="1.5"/>
+  <polygon points="374,276 386,276 380,264" fill="#6b7280"/>
+  <text x="388" y="300" dominant-baseline="central" font-size="12" fill="#4b5563">③ 回拉保存结果</text>
+
+  <rect x="220" y="320" width="240" height="52" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1"/>
+  <text x="340" y="338" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="500" fill="#064e3b">RM 应用</text>
+  <text x="340" y="356" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#047857">资源池 · 回调 · 版本管理</text>
+
+  <text x="340" y="392" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#6b7280">① RM_OO_APIJS_BASE　② RM_OO_CALLBACK_HOST　③ RM_OO_INTERNAL_BASE</text>
+</svg>
