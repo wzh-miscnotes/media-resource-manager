@@ -425,9 +425,13 @@
     border:1px solid var(--line);border-radius:10px;background:#fff;padding:14px 16px}
   .doc-view .doc-preview.hidden{display:none}
   .doc-preview .dp-h{font-size:12px;color:var(--sub);margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--line)}
-  .doc-preview table{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}
-  .doc-preview th,.doc-preview td{border:1px solid var(--line);padding:5px 8px;vertical-align:top;word-break:break-word;max-width:320px}
+  /* 表格按内容自然宽度：列多时超出容器 → 出现横向滚动条；min-width 防止中文逐字竖排 */
+  .doc-preview table{border-collapse:collapse;width:max-content;min-width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}
+  .doc-preview th,.doc-preview td{border:1px solid var(--line);padding:5px 8px;vertical-align:top;
+    white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;min-width:72px;max-width:260px}
   .doc-preview th{background:#f5f6f8;text-align:center;color:var(--sub);font-weight:600}
+  .doc-preview thead th{position:sticky;top:0;z-index:2}                 /* 字母表头纵向滚动时吸顶 */
+  .doc-preview thead th:first-child,.doc-preview tbody th:first-child{min-width:44px;max-width:44px}
   .doc-preview .dp-sheet{margin-bottom:18px}
   .doc-preview .dp-sheet-t{font-weight:600;font-size:13px;margin-bottom:6px}
   .doc-preview .dp-line{font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word;padding:2px 0}
@@ -1723,11 +1727,13 @@ async function _loadDocPreview(prefix, it, mediaUrl){
       const sheets = (j.data||[]).map(s=>{
         const rows = (s.rows||[]);
         if(!rows.length) return `<div class="dp-sheet"><div class="dp-sheet-t">${esc(s.name)} · 空表</div></div>`;
-        const head = `<tr><th>#</th>${rows[0].map((_,c)=>`<th>${String.fromCharCode(65+c)}</th>`).join("")}</tr>`;
-        const body = rows.map((row,ri)=>`<tr><th>${ri+1}</th>${row.map(cell=>`<td>${esc(cell)}</td>`).join("")}</tr>`).join("");
-        return `<div class="dp-sheet"><div class="dp-sheet-t">${esc(s.name)} · ${rows.length} 行</div><table>${head}${body}</table></div>`;
+        const ncols = Math.min(40, rows.reduce((m,r)=>Math.max(m,(r||[]).length),0));
+        const colName = (i)=>{ let s=""; ++i; while(i>0){ const m=(i-1)%26; s=String.fromCharCode(65+m)+s; i=Math.floor((i-1)/26); } return s; };
+        const head = `<thead><tr><th>#</th>${Array.from({length:ncols},(_,c)=>`<th>${colName(c)}</th>`).join("")}</tr></thead>`;
+        const body = `<tbody>${rows.map((row,ri)=>`<tr><th>${ri+1}</th>${Array.from({length:ncols},(_,c)=>`<td>${esc((row||[])[c]||"")}</td>`).join("")}</tr>`).join("")}</tbody>`;
+        return `<div class="dp-sheet"><div class="dp-sheet-t">${esc(s.name)} · ${rows.length} 行 · ${rows[0].length} 列（可横向滚动）</div><table>${head}${body}</table></div>`;
       }).join("");
-      box.innerHTML = '<div class="dp-h">只读预览 · 表格内容（最多 200 行 / 40 列，样式不保留）</div>' + (sheets||'<div class="muted">空文档</div>');
+      box.innerHTML = '<div class="dp-h">只读预览 · 表格内容（最多 200 行 / 40 列，样式不保留；列多可横向滚动，表头滚动时吸顶）</div>' + (sheets||'<div class="muted">空文档</div>');
     } else if(j.kind === "doc"){
       const lines = (j.data||[]).map(x=>`<div class="dp-line">${esc(x)}</div>`).join("");
       box.innerHTML = '<div class="dp-h">只读预览 · 正文文本（样式不保留）</div>' + (lines||'<div class="muted">空文档</div>');

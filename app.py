@@ -1912,8 +1912,21 @@ _OO_PREVIEW_MAX_COLS = 40
 _OO_PREVIEW_MAX_CELLS = 20000
 
 
+def _oo_col_idx(ref):
+    """'G2' -> 6（0-based 列号）。无 r 属性返回 None，由调用方按序兜底。"""
+    m = re.match(r"([A-Za-z]+)", ref or "")
+    if not m:
+        return None
+    n = 0
+    for ch in m.group(1).upper():
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+
 def _oo_parse_xlsx(path):
-    """从 xlsx 提取 (sheet_name -> rows[][])。共享字符串 + inlineStr + 数值，跳过样式。"""
+    """从 xlsx 提取 (sheet_name -> rows[][])。共享字符串 + inlineStr + 数值，跳过样式。
+    ⚠ 必须按 <c r="G2"> 的列坐标占位：空单元格在 xlsx 里常被省略，
+      若只按元素顺序 append，后面的数据会整体左移（2026-11-26 实测 bug）。"""
     import xml.etree.ElementTree as ET
     out = []
     with zipfile.ZipFile(path) as z:
@@ -1936,7 +1949,15 @@ def _oo_parse_xlsx(path):
                 if len(rows) >= _OO_PREVIEW_MAX_ROWS:
                     break
                 cells = []
+                next_idx = 0
                 for c in row.findall(_OO_NS_MAIN + "c"):
+                    col = _oo_col_idx(c.get("r"))
+                    idx = col if col is not None else next_idx
+                    if idx >= _OO_PREVIEW_MAX_COLS:
+                        break
+                    while len(cells) <= idx:
+                        cells.append("")          # 空洞占位，保持列号与编辑器一致
+                    next_idx = idx + 1
                     t = (c.get("t") or "").strip()
                     v = c.find(_OO_NS_MAIN + "v")
                     if t == "inlineStr":
@@ -1951,9 +1972,7 @@ def _oo_parse_xlsx(path):
                             txt = ""
                     else:
                         txt = v.text or ""
-                    cells.append(txt)
-                    if len(cells) >= _OO_PREVIEW_MAX_COLS:
-                        break
+                    cells[idx] = txt
                 rows.append(cells)
             out.append({"name": sf.split("/")[-1].replace(".xml", ""), "rows": rows})
     return out
