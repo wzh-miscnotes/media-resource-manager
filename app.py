@@ -2822,6 +2822,13 @@ class TrashRestoreReq(BaseModel):
     target_sid: str = ""
     body_key8: str = ""   # 指定则精确还原该旧版本，否则按 rid 级条目还原
 
+class TrashBatchItem(BaseModel):
+    rid: str = ""
+    body_key8: str = ""
+
+class TrashBatchReq(BaseModel):
+    items: list[TrashBatchItem] = []
+
 @app.get("/api/trash")
 def trash_list(sid: str = Depends(current_identity)):
     """列出回收站资源（含物理存在性、当前活跃引用数）。仅管理员。"""
@@ -2844,14 +2851,10 @@ def trash_list(sid: str = Depends(current_identity)):
         out.append({**it, "physical_exists": phys, "active_refs": active})
     return {"ok": True, "items": out}
 
-@app.post("/api/trash/purge")
-def trash_purge(req: TrashPurgeReq, sid: str = Depends(current_identity)):
-    """永久清理回收站资源：物理删除资源池目录 + 吊销同 rid 共享令牌。
-    文章 .md 默认保留（A 立场），不无差别删除用户资产。仅管理员。"""
-    if sid != "admin@local":
-        raise HTTPException(403, "仅管理员可清理回收站")
-    rid = (req.rid or "").strip()
-    bk = (req.body_key8 or "").strip()
+def _do_trash_purge(rid: str, bk: str) -> dict:
+    """清理单条的核心逻辑（单条/批量共用）。rid 必填；bk 指定时只删该版本子目录。"""
+    rid = (rid or "").strip()
+    bk = (bk or "").strip()
     if not rid:
         raise HTTPException(400, "rid 必填")
     remove_trash_entry(rid, bk or None)  # 精确移除匹配的回收站条目（bk 缺省则移除该 rid 全部）
@@ -2865,14 +2868,18 @@ def trash_purge(req: TrashPurgeReq, sid: str = Depends(current_identity)):
     _revoke_shares_for_resource(rid)
     return {"ok": True, "rid": rid, "body_key8": bk, "physical_removed": physical_removed}
 
-@app.post("/api/trash/restore")
-def trash_restore(req: TrashRestoreReq, sid: str = Depends(current_identity)):
-    """恢复回收站资源：重建一条引用挂回目标用户默认合集（默认 trashed_from，admin 可改派）。
-    物理文件本就未删，恢复即重建逻辑引用。仅管理员。"""
+@app.post("/api/trash/purge")
+def trash_purge(req: TrashPurgeReq, sid: str = Depends(current_identity)):
+    """永久清理回收站资源：物理删除资源池目录 + 吊销同 rid 共享令牌。
+    文章 .md 默认保留（A 立场），不无差别删除用户资产。仅管理员。"""
     if sid != "admin@local":
-        raise HTTPException(403, "仅管理员可恢复")
-    rid = (req.rid or "").strip()
-    bk = (req.body_key8 or "").strip()
+        raise HTTPException(403, "仅管理员可清理回收站")
+    return _do_trash_purge((req.rid or "").strip(), (req.body_key8 or "").strip())
+
+def _do_trash_restore(rid: str, bk: str, target_sid: str = "") -> str:
+    """恢复单条的核心逻辑（单条/批量共用），返回目标 sid。"""
+    rid = (rid or "").strip()
+    bk = (bk or "").strip()
     if not rid:
         raise HTTPException(400, "rid 必填")
     with _collections_txn():
@@ -2884,7 +2891,7 @@ def trash_restore(req: TrashRestoreReq, sid: str = Depends(current_identity)):
                       if it.get("resource_id") == rid and (it.get("body_key8") or "") == bk), None)
         if not entry:
             raise HTTPException(404, "回收站中无此资源")
-        tgt = (req.target_sid or "").strip() or entry.get("trashed_from") or "admin@local"
+        tgt = (target_sid or "").strip() or entry.get("trashed_from") or "admin@local"
         tcols = _sid_collections(tgt)
         default = next((c for c in tcols if c.get("id") == "default"), None)
         if not default:
@@ -2906,7 +2913,52 @@ def trash_restore(req: TrashRestoreReq, sid: str = Depends(current_identity)):
         _save_collections()
     # 资源恢复到 owner 正常合集后，解除该 owner 对应令牌的锁定（令牌仍 revoked，需手动重新开启）
     _unlock_owner_shares(tgt, rid)
+    return tgt
+
+@app.post("/api/trash/restore")
+def trash_restore(req: TrashRestoreReq, sid: str = Depends(current_identity)):
+    """恢复回收站资源：重建一条引用挂回目标用户默认合集（默认 trashed_from，admin 可改派）。
+    物理文件本就未删，恢复即重建逻辑引用。仅管理员。"""
+    if sid != "admin@local":
+        raise HTTPException(403, "仅管理员可恢复")
+    rid = (req.rid or "").strip()
+    tgt = _do_trash_restore(rid, (req.body_key8 or "").strip(), (req.target_sid or "").strip())
     return {"ok": True, "rid": rid, "target_sid": tgt}
+
+def _trash_batch_result(req: TrashBatchReq, action: str) -> dict:
+    """批量执行恢复/清理：逐条复用单条核心，单条失败不中断其余，返回明细。"""
+    ok, failed = [], []
+    fn = _do_trash_restore if action == "restore" else _do_trash_purge
+    for item in req.items:
+        rid, bk = (item.rid or "").strip(), (item.body_key8 or "").strip()
+        entry = {"rid": rid, "body_key8": bk}
+        try:
+            r = fn(rid, bk)
+            if action == "restore":
+                entry["target_sid"] = r
+            else:
+                entry["physical_removed"] = r.get("physical_removed", False)
+            ok.append(entry)
+        except Exception as e:
+            entry["error"] = str(e.detail) if isinstance(e, HTTPException) else str(e)
+            failed.append(entry)
+    return {"ok": True, "action": action, "total": len(req.items),
+            "succeeded": len(ok), "failed_count": len(failed),
+            "results": ok, "failures": failed}
+
+@app.post("/api/trash/restore-batch")
+def trash_restore_batch(req: TrashBatchReq, sid: str = Depends(current_identity)):
+    """批量恢复：逐条重建引用（每条独立事务，单条失败不影响其余）。仅管理员。"""
+    if sid != "admin@local":
+        raise HTTPException(403, "仅管理员可恢复")
+    return _trash_batch_result(req, "restore")
+
+@app.post("/api/trash/purge-batch")
+def trash_purge_batch(req: TrashBatchReq, sid: str = Depends(current_identity)):
+    """批量清理：逐条精确清理（bk 指定则只删该版本，不碰当前版）。仅管理员。"""
+    if sid != "admin@local":
+        raise HTTPException(403, "仅管理员可清理回收站")
+    return _trash_batch_result(req, "purge")
 
 @app.get("/share/{token}", include_in_schema=False)
 def share_page(token: str):

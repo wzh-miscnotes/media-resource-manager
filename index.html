@@ -172,9 +172,6 @@
     stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
   .oo-item .oo-nm{display:block}
   .oo-item .oo-ex{display:block;font-size:11px;color:var(--sub)}
-  /* 回收站卡片：恢复/清理按钮浮于右上角 */
-  .lib-card.trash-card{position:relative}
-  .trash-actions{position:absolute;top:8px;right:8px;display:flex;gap:6px;z-index:2}
   .lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}
   .lib-card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;
     cursor:pointer;transition:.15s;display:flex;flex-direction:column}
@@ -253,6 +250,8 @@
   .ua-row .i{color:var(--sub);font-size:12px}
   .tag-admin{background:#eef1f6;color:var(--sub);border-radius:6px;padding:1px 6px;font-size:11px;margin-left:6px}
   .modal-body{display:flex;gap:0;min-height:0;flex:1;align-items:stretch}
+  /* 回收站弹窗复用 .modal-body，必须覆盖播放器专用的 flex 横排 → 纵向单列列表（2026-11-26） */
+  .modal-body.trash-body{display:block;overflow-y:auto;padding:12px 18px}
   /* 左栏整列可滚：视频下方可挂「AI 文章 / 字幕原文」折叠区，右侧播放列表不受影响 */
   .player-col{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;overflow-y:auto}
   .modal-body video{width:100%;max-height:62vh;background:#000;flex:none;min-width:0}
@@ -620,17 +619,19 @@
       </div>
       <div class="lib-batch hidden" id="libBatch" data-page-node-id="5zJyIJgQOloc0gnXBvjYID">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer" data-page-node-id="DFOGW184GPnk2rukrNCxKL">
-          <input type="checkbox" id="libSelectAll" onchange="toggleSelectAll(this)" data-page-node-id="xkOZDp0zKW9anZ96RmCmPW"> 全选
+          <input type="checkbox" id="libSelectAll" onchange="onSelectAllChange(this)" data-page-node-id="xkOZDp0zKW9anZ96RmCmPW"> 全选
         </label>
         <span class="selcount" id="libSelCount" data-page-node-id="MnJKcFdFjpTLiFR9udSMHS">已选 0 个</span>
         <span class="spacer" data-page-node-id="iihDijng3N6hiBOR86m5Ry"></span>
-        <select id="libMoveTarget" title="选择目标合集" data-page-node-id="IdYhLPYm4U2biuVBlLcIH6"></select>
-        <button class="btn-ghost btn-sm" onclick="batchMove()" data-page-node-id="VmcwBrYbo99AxNkQrD5FF8">移动到</button>
-        <button class="btn-ghost btn-sm" id="btnDownloadSel" onclick="batchDownload()" title="选中 1 个直接下载原文件；选中多个打包成 zip（视频/图文/文档通用）">⬇ 下载选中</button>
-        <button class="btn-ghost btn-sm" id="btnGenArticles" onclick="batchGenArticles()" title="对选中的视频逐个生成图文（本地模型串行执行，已有文章的自动跳过）">✍️ 生成图文</button>
-        <button class="btn-ghost btn-sm" id="btnDelArticles" onclick="batchDeleteArticles()" title="删除选中视频关联的已生成图文（不影响视频与字幕文件）">🧹 删除已生成</button>
-        <button class="btn-ghost btn-sm" id="btnArtImgImport" onclick="batchImportArticleImages()" title="把选中图文的正文图片与封面复制成你的图片资产（视频自动忽略；内容相同不会重复保存）">🖼️ 图片入库</button>
-        <button class="btn-danger btn-sm" id="btnDeleteSel" onclick="batchDelete()" title="视频：连同字幕与封面一起删除；图文：连同正文文件删除" data-page-node-id="m4nacfX3ROlcsDGCNegxuG">🗑 删除选中（含字幕）</button>
+        <select id="libMoveTarget" class="main-batch" title="选择目标合集" data-page-node-id="IdYhLPYm4U2biuVBlLcIH6"></select>
+        <button class="btn-ghost btn-sm main-batch" onclick="batchMove()" data-page-node-id="VmcwBrYbo99AxNkQrD5FF8">移动到</button>
+        <button class="btn-ghost btn-sm main-batch" id="btnDownloadSel" onclick="batchDownload()" title="选中 1 个直接下载原文件；选中多个打包成 zip（视频/图文/文档通用）">⬇ 下载选中</button>
+        <button class="btn-ghost btn-sm main-batch" id="btnGenArticles" onclick="batchGenArticles()" title="对选中的视频逐个生成图文（本地模型串行执行，已有文章的自动跳过）">✍️ 生成图文</button>
+        <button class="btn-ghost btn-sm main-batch" id="btnDelArticles" onclick="batchDeleteArticles()" title="删除选中视频关联的已生成图文（不影响视频与字幕文件）">🧹 删除已生成</button>
+        <button class="btn-ghost btn-sm main-batch" id="btnArtImgImport" onclick="batchImportArticleImages()" title="把选中图文的正文图片与封面复制成你的图片资产（视频自动忽略；内容相同不会重复保存）">🖼️ 图片入库</button>
+        <button class="btn-danger btn-sm main-batch" id="btnDeleteSel" onclick="batchDelete()" title="视频：连同字幕与封面一起删除；图文：连同正文文件删除" data-page-node-id="m4nacfX3ROlcsDGCNegxuG">🗑 删除选中（含字幕）</button>
+        <button class="btn-ghost btn-sm hidden" id="btnTrashRestoreSel" onclick="batchTrashRestore(false)" title="批量恢复选中项：在各原属用户默认合集重建引用（文件本就保留）">♻ 批量恢复</button>
+        <button class="btn-danger btn-sm hidden" id="btnTrashPurgeSel" onclick="batchTrashPurge(false)" title="批量清理选中项：bk 指定时只删该旧版本子目录，不碰当前版本">🗑 批量清理</button>
         <button class="btn-ghost btn-sm" onclick="clearSelection()" data-page-node-id="8iW1AB2TCA3PhegVgRtsla">取消选择</button>
       </div>
       <div class="lib-grid" id="libGrid" data-page-node-id="v1RM92yIrCcGFa5uiEcNtn"></div>
@@ -993,7 +994,19 @@
         <span class="muted" style="font-size:12px">引用归零的资源，物理保留于此，可清理或恢复</span>
         <button class="btn-ghost btn-sm" onclick="closeTrash()">关闭</button>
       </div>
-      <div class="modal-body" id="trashBody"><div class="muted">加载中…</div></div>
+      <!-- 弹窗回收站批量条：与媒体库主批量栏同款（全选/计数/批量恢复/批量清理/取消） -->
+      <div class="lib-batch hidden" id="trashBatch" style="margin:10px 18px 0">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="trashSelectAll" onchange="toggleTrashModalSelectAll(this)"> 全选
+        </label>
+        <span class="selcount" id="trashSelCount">已选 0 个</span>
+        <span class="spacer"></span>
+        <button class="btn-ghost btn-sm" onclick="batchTrashRestore(true)" title="批量恢复选中项：在各原属用户默认合集重建引用">♻ 批量恢复</button>
+        <button class="btn-danger btn-sm" onclick="batchTrashPurge(true)" title="批量清理选中项：bk 指定时只删该旧版本子目录">🗑 批量清理</button>
+        <button class="btn-ghost btn-sm" onclick="clearTrashModalSelection()">取消选择</button>
+      </div>
+      <!-- .modal-body 默认是播放器弹窗的 flex 横排（视频+播放列表），回收站必须覆盖成纵向列表 -->
+      <div class="modal-body trash-body" id="trashBody"><div class="muted">加载中…</div></div>
     </div>
   </div>
 
@@ -1225,6 +1238,17 @@ let libData = { collections: [] };
 let currentLibItem = null;
 let _libProgBound = false;
 let _sel = new Set();   // 当前选中的视频 rel_path 集合（批量操作用）
+/* 回收站选择集（2026-11-26）：与媒体库主选择集 _sel 完全隔离，避免批量动作串味。
+   key = rid + "|" + body_key8（rid/版本都可能重复，必须组合才唯一）。
+   网格视图与弹窗视图各自一套，可按入口独立操作。 */
+let _trashSel = new Set(), _trashModalSel = new Set();
+let _trashGridItems = [], _trashModalItems = [];
+function _isTrashView(){ const s=document.getElementById("libColl"); return !!s && s.value === "__trash__"; }
+function _trashKey(rid, bk){ return (rid||"") + "|" + (bk||""); }
+function _trashPicked(items, set){
+  const keys = items.map(it=>_trashKey(it.resource_id, it.body_key8||""));
+  return items.filter((it,idx)=>set.has(keys[idx]));
+}
 
 /* 四个 tab 只做「类型筛选」，合集下拉与数据完全共用（2026-11-24 三态，11-26 加文档库）。
    _libKind: all | video | article | office，默认 all（等同原「我的媒体库」的全量视图）。 */
@@ -1366,7 +1390,8 @@ async function renderLibGrid(){
   }
   const bP = document.getElementById("btnPruneShared");
   if(bP) bP.classList.toggle("hidden", !isShared);
-  if(isShared || isTrash) document.getElementById("libBatch").classList.add("hidden");
+  // 回收站不再隐藏批量栏：改由 renderTrashGrid/updateBatchBar 切成「批量恢复/清理」模式（2026-11-26）
+  if(isShared) document.getElementById("libBatch").classList.add("hidden");
   empty.textContent = isTrash
     ? "回收站是空的。"
     : isShared
@@ -1879,6 +1904,28 @@ function _shareBadge(it){
 }
 
 // ---- 批量选择 ----
+/* 回收站网格视图：勾选状态与主列表隔离，key=rid|body_key8。 */
+function onTrashPick(el){
+  const key = el.dataset.key;
+  if(el.checked) _trashSel.add(key); else _trashSel.delete(key);
+  el.closest(".lib-card").classList.toggle("picked", el.checked);
+  updateBatchBar();
+}
+function toggleTrashSelectAll(cb){
+  _trashGridItems.forEach(it=>{
+    const key = _trashKey(it.resource_id, it.body_key8||"");
+    if(cb.checked) _trashSel.add(key); else _trashSel.delete(key);
+  });
+  document.querySelectorAll("#libGrid .trash-card").forEach(card=>{
+    const box = card.querySelector(".pick"); if(!box) return;
+    box.checked = cb.checked;
+    card.classList.toggle("picked", cb.checked);
+  });
+  updateBatchBar();
+}
+function onSelectAllChange(cb){
+  if(_isTrashView()) toggleTrashSelectAll(cb); else toggleSelectAll(cb);
+}
 function onPick(el){
   const rel = el.dataset.rel;
   if(el.checked) _sel.add(rel); else _sel.delete(rel);
@@ -1892,9 +1939,9 @@ function toggleSelectAll(cb){
   renderLibGrid();
 }
 function clearSelection(){
-  _sel.clear();
+  _sel.clear(); _trashSel.clear();
   const sa = document.getElementById("libSelectAll");
-  if(sa) sa.checked = false;
+  if(sa){ sa.checked = false; sa.indeterminate = false; }
   updateBatchBar();
 }
 function onCollChange(){
@@ -1906,23 +1953,26 @@ function updateBatchBar(){
   const cnt = document.getElementById("libSelCount");
   const selAll = document.getElementById("libSelectAll");
   const target = document.getElementById("libMoveTarget");
-  const n = _sel.size;
-  if(n > 0){
-    bar.classList.remove("hidden");
-    cnt.textContent = `已选 ${n} 个`;
-  } else {
-    bar.classList.add("hidden");
+  const isTrash = _isTrashView();
+  // 主列表专用按钮 ↔ 回收站专用按钮：按视图切换，杜绝批量动作串味（2026-11-26）
+  bar.querySelectorAll(".main-batch").forEach(el=>el.classList.toggle("hidden", isTrash));
+  const br = document.getElementById("btnTrashRestoreSel"), bp = document.getElementById("btnTrashPurgeSel");
+  if(br) br.classList.toggle("hidden", !isTrash);
+  if(bp) bp.classList.toggle("hidden", !isTrash);
+  const n = isTrash ? _trashSel.size : _sel.size;
+  const total = isTrash ? _trashGridItems.length : currentCollItems().length;
+  if(n > 0){ bar.classList.remove("hidden"); cnt.textContent = `已选 ${n} 个`; }
+  else{ bar.classList.add("hidden"); }
+  if(!isTrash){
+    // 目标合集下拉：排除当前合集与只读的「被共享」合集
+    const curCid = document.getElementById("libColl").value;
+    const others = (libData.collections||[]).filter(c=>c.id!==curCid && !c.shared);
+    target.innerHTML = others.length
+      ? others.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")
+      : `<option value="">（无其他合集）</option>`;
   }
-  // 目标合集下拉：排除当前合集与只读的「被共享」合集
-  const curCid = document.getElementById("libColl").value;
-  const others = (libData.collections||[]).filter(c=>c.id!==curCid && !c.shared);
-  target.innerHTML = others.length
-    ? others.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")
-    : `<option value="">（无其他合集）</option>`;
-  // 全选框状态
-  const total = currentCollItems().length;
   if(selAll){ selAll.checked = (total>0 && n===total); selAll.indeterminate = (n>0 && n<total); }
-  _refreshBatchBtns();   // 专用按钮按选中项类型置灰（仅「全部」tab 需要）
+  if(!isTrash) _refreshBatchBtns();   // 专用按钮按选中项类型置灰（仅「全部」tab 需要）
 }
 /* 统一下载（2026-11-26）：单选直接下原文件，多选打包 zip。视频/图文/文档通用。
    单选走 /api/files/<rel>（与视频播放页同源，带 share token）；多选走后端打包端点。
@@ -2102,8 +2152,10 @@ async function renderTrashGrid(){
     if(!r.ok){ grid.innerHTML = '<div class="muted">无法访问回收站：'+r.status+'</div>'; return; }
     const j = await r.json();
     const items = j.items||[];
+    _trashGridItems = items;
+    _trashSel.clear();   // 每次重拉回收站都重置勾选（与主列表 loadLibrary 行为一致）
     document.getElementById("libCount").textContent = `回收站 ${items.length} 个`;
-    if(!items.length){ grid.innerHTML=""; empty.textContent="回收站是空的。"; empty.classList.remove("hidden"); return; }
+    if(!items.length){ grid.innerHTML=""; empty.textContent="回收站是空的。"; empty.classList.remove("hidden"); updateBatchBar(); return; }
     empty.classList.add("hidden");
     grid.innerHTML = items.map((it)=>{
       const rid = esc(it.resource_id);
@@ -2113,19 +2165,26 @@ async function renderTrashGrid(){
       const cover = _coverHTML(snap);
       const phys = it.physical_exists ? "物理✓" : "物理缺失";
       const verTag = bk ? `<span class="ver-badge">旧版本 ${bk}</span>` : "";
-      return `<div class="lib-card trash-card">
+      const key = esc(_trashKey(it.resource_id, it.body_key8||""));
+      const checked = _trashSel.has(_trashKey(it.resource_id, it.body_key8||"")) ? "checked" : "";
+      const picked = checked ? " picked" : "";
+      // 卡片结构与主列表完全同构：左上角勾选框 + meta 内底部 pv-row 按钮行
+      return `<div class="lib-card trash-card${picked}">
+        <input type="checkbox" class="pick" ${checked} data-key="${key}"
+          onclick="event.stopPropagation()" onchange="onTrashPick(this)">
         ${cover}
         <div class="meta">
           <div class="t">${tn}</div>
           <div class="kind-row">${verTag}${_kindTags(snap)}</div>
           <div class="sub"><span class="${it.physical_exists?'':'stale'}">${phys}</span> · 活跃引用 ${it.active_refs||0}</div>
-        </div>
-        <div class="trash-actions">
-          <button class="btn-primary btn-sm" onclick="event.stopPropagation();trashRestore('${rid}','${bk}')">♻ 恢复</button>
-          <button class="btn-ghost btn-sm" style="color:#c0392b" onclick="event.stopPropagation();trashPurge('${rid}','${bk}')">🗑 清理</button>
+          <div class="pv-row">
+            <button class="pv-btn" title="恢复该项（在其原属用户默认合集重建引用）" onclick="event.stopPropagation();trashRestore('${rid}','${bk}')">♻ 恢复</button>
+            <button class="pv-btn" style="color:#c0392b" title="${bk?'仅永久清理该旧版本子目录，当前版本不受影响':'永久清理整个资源（含全部版本），不可恢复'}" onclick="event.stopPropagation();trashPurge('${rid}','${bk}')">🗑 清理</button>
+          </div>
         </div>
       </div>`;
     }).join("");
+    updateBatchBar();
   }catch(e){ grid.innerHTML='<div class="muted">加载回收站失败：'+e+'</div>'; }
 }
 // 回收站操作后刷新：网格视图（下拉选回收站）重拉 library；弹窗视图（顶部按钮）重渲染弹窗
@@ -2136,7 +2195,9 @@ function refreshAfterTrashOp(){
 }
 function renderTrash(items){
   const box = document.getElementById("trashBody");
-  if(!items.length){ box.innerHTML = '<div class="muted">回收站是空的。</div>'; return; }
+  _trashModalItems = items;
+  _trashModalSel.clear();
+  if(!items.length){ box.innerHTML = '<div class="muted">回收站是空的。</div>'; updateTrashModalBatchBar(); return; }
   box.innerHTML = items.map(it=>{
     const rid = esc(it.resource_id);
     const bk = esc(it.body_key8||"");
@@ -2145,16 +2206,21 @@ function renderTrash(items){
     const ts = it.trashed_at ? new Date(it.trashed_at*1000).toLocaleString("zh-CN",{hour12:false}) : "";
     const phys = it.physical_exists ? "物理✓" : "物理缺失";
     const refs = it.active_refs||0;
-    return `<div style="border:1px solid #e3e3e3;border-radius:8px;padding:10px 12px;margin-bottom:10px">
-      <div style="font-weight:600">${tn}${bk?` <span class="ver-badge">旧版本 ${bk}</span>`:""}</div>
-      <div class="muted" style="font-size:12px;margin:4px 0">rid ${rid} · 来自 ${from} · ${ts}</div>
-      <div class="muted" style="font-size:12px">状态：${phys} · 当前活跃引用 ${refs}</div>
-      <div style="margin-top:8px;display:flex;gap:8px">
-        <button class="btn-primary btn-sm" onclick="trashRestore('${rid}','${bk}')">♻ 恢复</button>
-        <button class="btn-ghost btn-sm" style="color:#c0392b" onclick="trashPurge('${rid}','${bk}')">🗑 永久清理</button>
+    const key = esc(_trashKey(it.resource_id, it.body_key8||""));
+    return `<div class="trash-modal-item" style="border:1px solid #e3e3e3;border-radius:8px;padding:10px 12px;margin-bottom:10px;display:grid;grid-template-columns:20px 1fr;gap:10px;align-items:start">
+      <input type="checkbox" class="trash-modal-pick" data-key="${key}" onchange="onTrashModalPick(this)" title="勾选后可批量恢复/清理" style="margin-top:4px;width:16px;height:16px;accent-color:var(--primary)">
+      <div>
+        <div style="font-weight:600">${tn}${bk?` <span class="ver-badge">旧版本 ${bk}</span>`:""}</div>
+        <div class="muted" style="font-size:12px;margin:4px 0">rid ${rid} · 来自 ${from} · ${ts}</div>
+        <div class="muted" style="font-size:12px">状态：${phys} · 当前活跃引用 ${refs}</div>
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="btn-ghost btn-sm" onclick="trashRestore('${rid}','${bk}')">♻ 恢复</button>
+          <button class="btn-ghost btn-sm" style="color:#c0392b" title="${bk?'仅清理该旧版本子目录':'清理整个资源（含全部版本）'}" onclick="trashPurge('${rid}','${bk}')">🗑 永久清理</button>
+        </div>
       </div>
     </div>`;
   }).join("");
+  updateTrashModalBatchBar();
 }
 async function trashRestore(rid, bk){
   bk = bk||"";
@@ -2177,6 +2243,88 @@ async function trashPurge(rid, bk){
     alert("已永久清理。");
     refreshAfterTrashOp();
   }catch(e){ alert("清理失败："+e); }
+}
+
+/* ---- 回收站批量恢复/清理（2026-11-26）----
+   网格与弹窗共用后端批量端点；每条独立事务，单条失败不中断其余。 */
+function updateTrashModalBatchBar(){
+  const bar = document.getElementById("trashBatch");
+  const cnt = document.getElementById("trashSelCount");
+  const sa = document.getElementById("trashSelectAll");
+  const n = _trashModalSel.size, total = _trashModalItems.length;
+  bar.classList.toggle("hidden", n === 0);
+  cnt.textContent = `已选 ${n} 个`;
+  if(sa){ sa.checked = (total>0 && n===total); sa.indeterminate = (n>0 && n<total); }
+}
+function onTrashModalPick(el){
+  const key = el.dataset.key;
+  if(el.checked) _trashModalSel.add(key); else _trashModalSel.delete(key);
+  el.closest(".trash-modal-item").style.background = el.checked ? "#fff6f9" : "";
+  updateTrashModalBatchBar();
+}
+function toggleTrashModalSelectAll(cb){
+  _trashModalItems.forEach(it=>{
+    const key = _trashKey(it.resource_id, it.body_key8||"");
+    if(cb.checked) _trashModalSel.add(key); else _trashModalSel.delete(key);
+  });
+  document.querySelectorAll("#trashBody .trash-modal-item").forEach(row=>{
+    const box = row.querySelector(".trash-modal-pick"); if(!box) return;
+    box.checked = cb.checked;
+    row.style.background = cb.checked ? "#fff6f9" : "";
+  });
+  updateTrashModalBatchBar();
+}
+function clearTrashModalSelection(){
+  _trashModalSel.clear();
+  document.querySelectorAll("#trashBody .trash-modal-pick").forEach(el=>{
+    el.checked = false;
+    el.closest(".trash-modal-item").style.background = "";
+  });
+  const sa = document.getElementById("trashSelectAll");
+  if(sa){ sa.checked = false; sa.indeterminate = false; }
+  updateTrashModalBatchBar();
+}
+async function _postTrashBatch(action, items){
+  const r = await fetch("/api/trash/" + action + "-batch", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({items: items.map(it=>({rid:it.resource_id, body_key8:it.body_key8||""}))})
+  });
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.detail || ("HTTP " + r.status));
+  return j;
+}
+function _trashBatchReport(j, action){
+  const verb = action === "restore" ? "恢复" : "清理";
+  let msg = `批量${verb}完成：成功 ${j.succeeded} 项`;
+  if(j.failed_count){
+    msg += `，失败 ${j.failed_count} 项：\n` + j.failures.map(f=>
+      f.rid + (f.body_key8 ? " ("+f.body_key8+")" : "") + " — " + f.error).join("\n");
+  }
+  alert(msg);
+}
+async function batchTrashRestore(fromModal){
+  const items = fromModal ? _trashPicked(_trashModalItems, _trashModalSel) : _trashPicked(_trashGridItems, _trashSel);
+  if(!items.length){ alert("请先勾选要恢复的资源"); return; }
+  if(!confirm(`确定批量恢复选中的 ${items.length} 项？将在各原属用户的默认合集重建引用（文件本就保留）。`)) return;
+  try{
+    _trashBatchReport(await _postTrashBatch("restore", items), "restore");
+    (fromModal ? _trashModalSel : _trashSel).clear();
+    if(fromModal) openTrash(); else refreshAfterTrashOp();
+  }catch(e){ alert("批量恢复失败：" + e.message); }
+}
+async function batchTrashPurge(fromModal){
+  const items = fromModal ? _trashPicked(_trashModalItems, _trashModalSel) : _trashPicked(_trashGridItems, _trashSel);
+  if(!items.length){ alert("请先勾选要清理的资源"); return; }
+  const bkCount = items.filter(it=>!!it.body_key8).length;
+  const tip = bkCount === items.length
+    ? `确定批量清理选中的 ${items.length} 个旧版本？只删对应版本子目录，当前版本不受影响，且不可恢复。`
+    : `确定批量清理选中的 ${items.length} 项？其中 ${items.length-bkCount} 项是整资源清理（会删除全部版本，含当前版本），不可恢复。`;
+  if(!confirm(tip)) return;
+  try{
+    _trashBatchReport(await _postTrashBatch("purge", items), "purge");
+    (fromModal ? _trashModalSel : _trashSel).clear();
+    if(fromModal) openTrash(); else refreshAfterTrashOp();
+  }catch(e){ alert("批量清理失败：" + e.message); }
 }
 
 /* ---- 硬字幕 OCR（内嵌字幕识别）：媒体库手动触发 ---- */
