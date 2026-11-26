@@ -735,21 +735,20 @@
           <span class="muted" data-page-node-id="88TN6mD43PHjYXZHysrGRa">目标合集：</span>
           <select id="uploadTarget" data-page-node-id="P7dHRuDKQOgZGaJIxJXyDB"></select>
         </div>
-        <!-- accept 用「纯 MIME、不夹扩展名」（2026-11-26 第三次调整）：
-             只要出现扩展名列表，Windows 通用对话框就把它们折叠成唯一的「自定义文件」项，
-             点该项要重新解析几十个通配模式并重扫目录 → 卡死。改用 MIME 后由系统生成
-             「视频文件 / 音频文件 / 图片文件 / PDF / Word / Excel / PowerPoint」等多个
-             具名类型项，既能过滤也不会触发自定义项。字幕（srt/vtt/ass/lrc）没有标准 MIME，
-             在「所有文件」里仍可选；最终由 doUpload 的扩展名白名单兜底校验。 -->
-        <input type="file" id="uploadFiles" multiple
-          accept="video/*,audio/*,image/*,text/plain,application/pdf,application/msword,application/vnd.ms-excel,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation"
-          data-page-node-id="i2iuMKgwQSjly3FuLz8JfC">
+        <!-- 刻意不写 accept（2026-11-26 第四次实测结论，最终方案）：
+             在 Windows 上，只要 accept 有内容，不管是扩展名列表（*.mp4,*.mkv,…）还是
+             MIME 通配（video/*,image/*…），Chrome/Edge 都会把它展开合并成唯一的
+             「自定义文件 (*.mpe;*.mpeg;…)」过滤器，并挤掉「所有文件 (*.*)」。点这个唯一
+             类型项要重新解析上百个通配模式并重扫目录 → 卡死。
+             不写 accept 时对话框只有「所有文件 (*.*)」，点下拉秒开，实测不卡。
+             类型过滤交给：① 文件名框输 *.xlsx 回车（系统原生过滤）；② doUpload 的白名单校验。 -->
+        <input type="file" id="uploadFiles" multiple data-page-node-id="i2iuMKgwQSjly3FuLz8JfC">
         <div class="up-drop" id="upDropAll" title="把文件拖到这里，无需打开文件选择窗口">
           <span class="dicon">📥</span>
           <span class="dhint">或把文件 / 整个文件夹直接拖到这里</span><br>
           <span>视频、字幕、封面图、Word/Excel/PPT/PDF 都可以；绕开系统文件选择窗口</span>
         </div>
-        <p class="muted" style="margin:0" data-page-node-id="nlhF8g2OEpF9DKhrgbKQWa">可一次选择多个文件：视频与同名字幕自动配对；Office 文档按内容哈希独立入池，可在「文档库」在线编辑、改名、看版本。文件窗口的「类型」下拉可按视频 / 图片 / PDF / Word / Excel / PPT 过滤；字幕（srt / vtt / ass / lrc）没有标准类型，切到「所有文件」即可选。选完由页面按后缀校验，不支持的类型会被自动忽略。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
+        <p class="muted" style="margin:0" data-page-node-id="nlhF8g2OEpF9DKhrgbKQWa">可一次选择多个文件：视频与同名字幕自动配对；Office 文档按内容哈希独立入池，可在「文档库」在线编辑、改名、看版本。文件窗口保持系统默认（「所有文件 (*.*)」，点类型下拉不卡）；想只看某类文件时，在<b>文件名框输入 <span style="font-family:ui-monospace,Consolas,monospace">*.xlsx</span> 回车</b>即可按类型过滤。选完由页面按后缀校验，不支持的类型会被自动忽略。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
         <div style="display:flex;gap:10px;align-items:center" data-page-node-id="sEfKPiEqomYAjFscxx01y4">
           <button class="btn-primary btn-sm" id="uploadBtn" onclick="doUpload()" data-page-node-id="VGUOfEplFV2GpknvppEQwH">开始上传</button>
           <span id="uploadMsg" class="muted" data-page-node-id="6CoTyHfP1pVMhEc1RvHImS"></span>
