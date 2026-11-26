@@ -396,6 +396,14 @@
   .play-grid{display:flex;gap:16px;align-items:flex-start}
   .play-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:14px}
   .play-main video{width:100%;max-height:58vh;background:#000;border-radius:12px;display:block}
+  /* office 文档视图：替代 <video>，避免把 xlsx/docx 塞进播放器一直转圈 */
+  .doc-view{border:1px solid var(--line);border-radius:12px;background:#fff;padding:38px 28px;
+    text-align:center;display:flex;flex-direction:column;align-items:center}
+  .doc-view .doc-icon{font-size:52px;line-height:1;margin-bottom:12px}
+  .doc-view .doc-name{font-size:19px;font-weight:600;word-break:break-word}
+  .doc-view .doc-meta{font-size:12px;color:var(--sub);margin-top:6px;display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+  .doc-view .doc-acts{margin-top:20px;display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+  .doc-view .doc-acts a.btn-ghost{color:var(--text);text-decoration:none;display:inline-flex;align-items:center}
   .play-side{width:320px;flex:none;border:1px solid var(--line);border-radius:12px;padding:12px;
     background:#fafbfc;display:flex;flex-direction:column;max-height:calc(100vh - 40px);
     position:sticky;top:20px}
@@ -617,6 +625,16 @@
           <video id="playerVideo" controls preload="metadata" data-page-node-id="WLaly57QcuSoGVmlAeT6zR"></video>
           <!-- 文章阅读器：sandbox 隔离（无 allow-same-origin），与 video 互斥显示 -->
           <iframe id="playerArticle" class="article-reader hidden" sandbox title="公众号文章正文"></iframe>
+          <!-- office 文档：与 video/iframe 互斥，不把 .xlsx/.docx 塞进播放器 -->
+          <div id="playerDoc" class="doc-view hidden">
+            <div class="doc-icon" id="playerDocIcon">📄</div>
+            <div class="doc-name" id="playerDocName"></div>
+            <div class="doc-meta" id="playerDocMeta"></div>
+            <div class="doc-acts">
+              <button class="btn-primary btn-sm" id="playerDocEdit" onclick="openOnlyOffice(currentLibItem)">✎ 在线编辑</button>
+              <a class="btn-ghost btn-sm" id="playerDocDl" href="#" download>⬇ 下载原文件</a>
+            </div>
+          </div>
           <div class="player-actions" id="playerActions" data-page-node-id="Jgjyd1l4J6qorCSsQ0hZ3i">
             <a id="dlVideoBtn" class="btn-ghost btn-sm" href="#" download data-page-node-id="dVp7a9Je6j4vkt7VAxaCcT">⬇ 保存视频</a>
             <a id="dlSubBtn" class="btn-ghost btn-sm" href="#" download data-page-node-id="FE42aNNjtftTGUuqTDY0hZ">⬇ 字幕(TXT)</a>
@@ -996,6 +1014,8 @@
           <a id="plpDlSubSrt" class="btn-ghost btn-sm hidden" href="#" download>⬇ 字幕(SRT)</a>
           <a id="plpDlCover" class="btn-ghost btn-sm hidden" href="#" download>⬇ 下载封面</a>
           <a id="plpDlArt" class="btn-ghost btn-sm hidden" href="#" download>⬇ 导出文章</a>
+          <a id="plpDlDoc" class="btn-ghost btn-sm hidden" href="#" download>⬇ 下载文档</a>
+          <button id="plpOoEdit" class="btn-ghost btn-sm hidden" onclick="openOnlyOffice(_ppItems[_ppIdx])">✎ 在线编辑</button>
           <button id="plpAttach" class="btn-ghost btn-sm hidden" onclick="openAttachDialog(_ppItems[_ppIdx])">📎 补录字幕/封面</button>
           <button id="plpEditArt" class="btn-ghost btn-sm hidden" onclick="openArtEditorForItem(_ppItems[_ppIdx])" title="编辑这篇图文（归档文章将派生副本，原文不动）">✎ 编辑图文</button>
           <button id="plpFullBtn" class="btn-ghost btn-sm hidden" onclick="toggleArticleFullscreen('plpArticle')" title="全屏阅读，按 Esc 退出">⛶ 全屏阅读</button>
@@ -1007,6 +1027,17 @@
         <div class="play-main">
           <video id="plpVideo" controls preload="metadata"></video>
           <iframe id="plpArticle" class="article-reader hidden" sandbox title="公众号文章正文"></iframe>
+          <!-- office 文档：不塞进 <video>，改为文档信息卡 + 编辑/下载入口 -->
+          <div id="plpDoc" class="doc-view hidden">
+            <div class="doc-icon" id="plpDocIcon">📄</div>
+            <div class="doc-name" id="plpDocName"></div>
+            <div class="doc-meta" id="plpDocMeta"></div>
+            <div class="doc-acts">
+              <button class="btn-primary btn-sm" id="plpDocEdit" onclick="openOnlyOffice(_ppItems[_ppIdx])">✎ 在线编辑</button>
+              <a class="btn-ghost btn-sm" id="plpDocDl" href="#" download>⬇ 下载原文件</a>
+            </div>
+            <p class="muted" style="font-size:12px;margin:14px 0 0">文档需要在 ONLYOFFICE 编辑器中查看与修改；下载原文件可在本地打开。</p>
+          </div>
           <div id="plpExtras"></div>
         </div>
         <aside class="play-side">
@@ -1343,7 +1374,7 @@ async function renderLibGrid(){
       // 失效条目不给浏览入口（新标签 / 弹窗都点不动）
       const pvRow = b.dead ? "" : `<div class="pv-row"><button class="pv-btn"
              title="${isArt?"在当前页面弹窗里阅读正文（不跳转）":"在当前页面弹窗里快速预览（不跳转）"}"
-             onclick="event.stopPropagation();playLibItem(${i})">${isArt?"▢ 阅读正文":"▢ 弹窗预览"}</button></div>`;
+             onclick="event.stopPropagation();playLibItem(${i})">${isArt?"▢ 阅读正文":"▢ 弹窗预览"}</button>${_ooBtn(it, i)}</div>`;
       return `<div class="lib-card shared${b.dead?" sp-dead":""}" onclick="openPlayerTab(${i})">
         <span class="sp-status ${b.cls}">${b.text}</span>
         <button class="sp-remove" title="从「被共享」移出（不影响对方的文件）" onclick="event.stopPropagation();removeShared('${esc(it.share_token||"")}')">✕ 移出</button>
@@ -1427,12 +1458,38 @@ function _isOffice(it){
   return !!(it && (it.media_type === "office" || it.source_type === "office"));
 }
 function _ooBtn(it, i){
-  if(!_auth.oo_enabled || !_isOffice(it) || it.shared) return "";
-  return `<button class="pv-btn" title="用 ONLYOFFICE 在线编辑（保存后派生新版本）" onclick="event.stopPropagation();openOnlyOffice(currentCollItems()[${i}])">✎ 在线编辑</button>`;
+  if(!_isOffice(it)) return "";
+  // 下载原文件：不依赖 oo_enabled（即使没启用在线编辑，文档也该能从列表页取回）
+  const href = "/api/files/" + encodeURI(it.rel_path || "")
+    + (it.share_token ? ("?share=" + encodeURIComponent(it.share_token)) : "");
+  const dl = `<a class="pv-btn" href="${href}" download title="下载文档原文件"
+    onclick="event.stopPropagation()">⬇ 下载文档</a>`;
+  if(!_auth.oo_enabled || it.shared) return dl;
+  return `<button class="pv-btn" title="用 ONLYOFFICE 在线编辑（保存后派生新版本）" onclick="event.stopPropagation();openOnlyOffice(currentCollItems()[${i}])">✎ 在线编辑</button>` + dl;
 }
 function openOnlyOffice(item){
   if(!item || !item.resource_id){ alert("该资源缺少 resource_id，无法在线编辑"); return; }
   window.open("/office/edit?rid=" + encodeURIComponent(item.resource_id), "_blank");
+}
+/* office 文档信息视图（播放页 #plpDoc / 弹窗 #playerDoc 共用）。
+   不把 .xlsx/.docx 塞进 <video>——那会一直转圈。只展示信息 + 编辑/下载入口。
+   prefix: "plpDoc" | "playerDoc"；canEdit 由调用方按 oo_enabled + 是否共享决定。 */
+function _renderDocView(prefix, it, mediaUrl, canEdit){
+  const doc = document.getElementById(prefix);
+  if(!doc) return;
+  doc.classList.remove("hidden");
+  const ext = (it.rel_path||"").split(".").pop().toLowerCase();
+  const icons = {docx:"📘",doc:"📘",odt:"📘",rtf:"📘",xlsx:"📗",xls:"📗",pptx:"📙",ppt:"📙",pdf:"📕"};
+  document.getElementById(prefix+"Icon").textContent = icons[ext] || "📄";
+  document.getElementById(prefix+"Name").textContent = it.title || it.rel_path;
+  const meta = [`<span>${esc(ext ? ext.toUpperCase() : "文档")}</span>`];
+  if(it.shared) meta.push(`<span>由 ${esc(it.share_owner||"对方")} 共享 · 只读</span>`);
+  if(!canEdit && !it.shared) meta.push(`<span>在线编辑未启用</span>`);
+  document.getElementById(prefix+"Meta").innerHTML = meta.join("");
+  const editBtn = document.getElementById(prefix+"Edit");
+  if(editBtn) editBtn.classList.toggle("hidden", !canEdit);
+  const dl = document.getElementById(prefix+"Dl");
+  if(dl){ dl.href = mediaUrl; dl.download = (it.rel_path||"").split("/").pop() || "document"; }
 }
 
 /* ---- 新建文档下拉（2026-11-25）----
@@ -2933,6 +2990,21 @@ async function playLibItem(i){
   document.getElementById("playerTitle").textContent = it.title || it.rel_path;
   const v = document.getElementById("playerVideo");
   const frame = document.getElementById("playerArticle");
+  // office 文档：不塞进 <video>；显示文档卡 + 编辑/下载入口（共享只读不给编辑）
+  if(_isOffice(it)){
+    v.pause(); v.removeAttribute("src"); v.load(); v.classList.add("hidden");
+    frame.classList.add("hidden"); frame.removeAttribute("src"); frame.removeAttribute("srcdoc");
+    document.getElementById("playerActions").classList.add("hidden");
+    document.getElementById("playerFullBtn").classList.add("hidden");
+    const footD = document.querySelector("#playerMask .modal-foot");
+    if(footD) footD.classList.add("hidden");
+    const exD = document.getElementById("playerExtras"); if(exD) exD.innerHTML = "";
+    _renderDocView("playerDoc", it, mediaUrl, !!(_auth.oo_enabled && !it.shared));
+    document.getElementById("playerMask").classList.remove("hidden");
+    renderPlaylist(items, i);
+    return;
+  }
+  document.getElementById("playerDoc").classList.add("hidden");
   // 文章：video 与 iframe 互斥；隐藏视频专属操作区，异步装正文
   if(_isArticle(it)){
     v.pause(); v.removeAttribute("src"); v.load(); v.classList.add("hidden");
@@ -4213,6 +4285,13 @@ async function initPlayMode(){
   document.body.classList.add("play-mode");
   document.getElementById("playView").classList.remove("hidden");
   const msg = document.getElementById("plpMsg");
+  // 播放页直达不走 initAuth()，但文档分支要读 _auth.oo_enabled、身份栏要读 identity。
+  // 这里只拉 bootstrap 填充 _auth 并渲染身份栏，不调 loadLibrary（播放页自己取 /api/library）。
+  try{
+    const br = await fetch("/api/bootstrap");
+    if(br.ok) _auth = Object.assign(_auth, await br.json());
+  }catch(e){}
+  renderAuthBar();
   const q = new URLSearchParams(location.search);
   _ppCollId = q.get("coll") || "default";
   _ppKind = (q.get("kind") === "video" || q.get("kind") === "article") ? q.get("kind") : "all";
@@ -4271,6 +4350,32 @@ async function showPlayPageItem(i){
   const frame = document.getElementById("plpArticle");
   v.pause();
   document.getElementById("plpTitle").textContent = it.title || it.rel_path;
+  // office 文档：不塞进 <video>（xlsx/docx 不是媒体，会一直转圈）；显示文档卡 + 编辑/下载入口。
+  // 共享条目只读：不给在线编辑（后端 oo_edit 也会 403），但允许下载原文件。
+  if(_isOffice(it)){
+    v.pause(); v.removeAttribute("src"); v.load(); v.classList.add("hidden");
+    frame.classList.add("hidden"); frame.removeAttribute("src"); frame.removeAttribute("srcdoc");
+    document.getElementById("plpFullBtn").classList.add("hidden");
+    document.getElementById("plpEditArt").classList.add("hidden");
+    ["plpDlVideo","plpDlSub","plpDlSubSrt","plpDlCover","plpAttach","plpDlArt"].forEach(id=>{
+      const el = document.getElementById(id); if(el) el.classList.add("hidden");
+    });
+    const canEdit = !!(_auth.oo_enabled && !it.shared);
+    ["plpOoEdit"].forEach(id=>document.getElementById(id).classList.toggle("hidden", !canEdit));
+    const topDocDl = document.getElementById("plpDlDoc");
+    topDocDl.classList.remove("hidden");
+    topDocDl.href = mediaUrl;
+    topDocDl.download = (it.rel_path||"").split("/").pop() || "document";
+    _renderDocView("plpDoc", it, mediaUrl, canEdit);
+    const pe = document.getElementById("plpExtras"); if(pe) pe.innerHTML = "";
+    document.getElementById("plpMsg").textContent = "";
+    document.title = (it.title || "文档") + " - 媒体资源库";
+    renderPlayPageList(i);
+    return;
+  }
+  document.getElementById("plpDoc").classList.add("hidden");
+  document.getElementById("plpDlDoc").classList.add("hidden");
+  document.getElementById("plpOoEdit").classList.add("hidden");
   // 文章：与视频互斥，隐藏视频导出按钮，异步装正文
   if(_isArticle(it)){
     v.removeAttribute("src"); v.load(); v.classList.add("hidden");
