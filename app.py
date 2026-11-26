@@ -4290,7 +4290,7 @@ def article_save(req: ArticleSaveReq, sid: str = Depends(current_identity)):
 async def oo_callback(req: dict, request: Request, sid: str = Depends(current_identity)):
     """ONLYOFFICE 保存回调（默认关闭）。
     仅 status 2/6 落盘；签名 + host 白名单双闸门；按 document.key 幂等；
-    回写走 _ingest_into_pool 派生新版本（旧版自动进回收站）。
+    回写走 _ingest_into_pool 派生新版本（旧版作为该文档的历史留在后端，不进回收站）。
     ⚠️ 无论成功失败都必须返回 {"error":0}，非 0 编辑器判定保存失败。
 
     ⚠️ 归属/签名参数在 **query** 上，不在 body 里：文档服务回调是把 callbackUrl
