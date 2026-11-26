@@ -233,6 +233,18 @@
   /* ⚠️ .lib-batch 自带 display:flex，与 .hidden{display:none} 同为单类选择器且定义更晚
      → 会覆盖 .hidden，导致「隐藏批量条」失效。必须补这条双类规则（优先级更高）。 */
   .lib-batch.hidden{display:none}
+  /* 勾选后的批量操作栏吸顶跟随：页面由 body 滚动，.wrap/.card 均无 overflow，
+     sticky 可直接生效。只作用于主列表 #libBatch（弹窗回收站的 #trashBatch 不在
+     滚动容器内，本来就常驻，无需吸顶）。 */
+  #libBatch{position:sticky;top:10px;z-index:25;
+    box-shadow:0 6px 18px rgba(198,52,111,.10)}
+  /* 吸顶时：上方 10px 缝隙用卡片底色盖住（左右外扩到卡片边缘），顶部两角改直角，
+     否则滚过去的内容会从缝隙和圆角缺口透出来。 */
+  #libBatch::before{content:"";position:absolute;left:-21px;right:-21px;bottom:100%;
+    height:12px;background:var(--card);pointer-events:none;display:none}
+  #libBatch.is-stuck{border-radius:0 0 12px 12px}
+  #libBatch.is-stuck::before{display:block}
+  @media(max-width:720px){ #libBatch{top:6px} }
   .lib-batch select{padding:7px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;
     background:#fbfcfe;color:var(--text);outline:none}
   .lib-batch .spacer{flex:1}
@@ -2051,8 +2063,10 @@ function updateBatchBar(){
   if(bp) bp.classList.toggle("hidden", !isTrash);
   const n = isTrash ? _trashSel.size : _sel.size;
   const total = isTrash ? _trashGridItems.length : currentCollItems().length;
-  if(n > 0){ bar.classList.remove("hidden"); cnt.textContent = `已选 ${n} 个`; }
-  else{ bar.classList.add("hidden"); }
+  if(n > 0){ bar.classList.remove("hidden"); cnt.textContent = `已选 ${n} 个`;
+    // 重新显示时立即重算吸顶状态：否则取消选择→滚动→再勾选，会残留上次的 is-stuck 白带
+    if(typeof bar._syncStuck === "function") bar._syncStuck(); }
+  else{ bar.classList.add("hidden"); bar.classList.remove("is-stuck"); }
   if(!isTrash){
     // 目标合集下拉：排除当前合集与只读的「被共享」合集
     const curCid = document.getElementById("libColl").value;
@@ -3907,6 +3921,31 @@ function _initDropZones(){
 }
 if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", _initDropZones);
 else _initDropZones();   // 脚本晚于 DOM 就绪时直接初始化
+
+/* ---- 批量栏吸顶视觉状态（2026-11-26）----
+   #libBatch 用 position:sticky + top:10px 跟随滚动；当它贴到顶部时加 .is-stuck，
+   由 CSS 补一条卡片底色遮住上方 10px 缝隙（否则滚过去的内容会从缝隙透出），
+   同时把顶部两角改成直角。纯视觉，不影响显隐逻辑。 */
+function _initStickyBatch(){
+  const bar = document.getElementById("libBatch");
+  if(!bar) return;
+  let raf = 0;
+  const sync = () => {
+    raf = 0;
+    // 以实际位置为准、不缓存状态：updateBatchBar 显隐时会手动增删该类，
+    // 缓存会造成「类已删但缓存仍记着」→ 重新显示时不补回（吸顶却露缝隙）。
+    // 隐藏时 rect 为 0，必须排除，否则会被误判成吸顶。
+    const s = !bar.classList.contains("hidden") && bar.getBoundingClientRect().top <= 10.5;
+    bar.classList.toggle("is-stuck", s);
+  };
+  const onScroll = () => { if(!raf) raf = requestAnimationFrame(sync); };
+  bar._syncStuck = sync;   // 供 updateBatchBar 在批量栏显示时立即重算（避免残留 is-stuck 类）
+  window.addEventListener("scroll", onScroll, { passive: true });
+  window.addEventListener("resize", onScroll, { passive: true });
+  sync();
+}
+if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", _initStickyBatch);
+else _initStickyBatch();
 
 /* ==================== 富文本图文编辑器 + 图片资产库（开源生产闭环） ====================
    设计见 wechat-archive/docs/公众号图文富样式-治本方案.md §8。
