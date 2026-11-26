@@ -141,13 +141,29 @@ def _oo_version_get(sid, rid):
         return 0
 
 
-def _oo_version_bump(sid, rid):
-    """保存成功后 +1。不用 body_key8 目录数推算——旧版进回收站后计数会倒退。"""
+def _oo_version_bump(sid, rid, body_key8="", size=0, ext="", title=""):
+    """保存成功后版本号 +1，并追加版本历史记录。
+
+    version 是逻辑计数（每次成功回写 +1，单调），body_key8 是内容寻址的物理版本。
+    两者分开：回滚只换合集条目的 rel_path 指针、不 bump version，保证编辑 key 单调不撞车。
+    不用 body_key8 目录数推算版本——目录会被 purge，且同内容 dedup 会复用目录。
+    """
     d = _oo_state(sid)
-    versions = d.setdefault("versions", {})
-    versions[rid] = _oo_version_get(sid, rid) + 1
+    n = _oo_version_get(sid, rid) + 1
+    d.setdefault("versions", {})[rid] = n
+    if body_key8:
+        entries = d.setdefault("version_log", {}).setdefault(rid, [])
+        rec = {"v": n, "body_key8": body_key8, "ts": int(time.time()),
+               "size": int(size or 0), "ext": ext or "", "title": title or ""}
+        hit = next((e for e in entries if e.get("body_key8") == body_key8), None)
+        if hit:
+            hit.update(rec)          # 内容未变重复保存：更新时间，不重复占一条
+        else:
+            entries.append(rec)
+        if len(entries) > 200:       # 防止 state 无限膨胀
+            del entries[:-200]
     _write_json(_oo_state_path(sid), d)
-    return versions[rid]
+    return n
 
 
 def _oo_key_seen(sid, key):
@@ -2029,13 +2045,157 @@ def oo_create(req: OOCreateReq, request: Request):
     try:
         _ingest_into_pool(sid, rid, body_key8, dest, [], title,
                           target_cid=(req.cid or "default"),
-                          content_sha256=h, source_type="office")
+                          content_sha256=h, source_type="office", keep_versions=True)
+        # 新建即 v1：版本历史从此刻起记录，前端只展示当前版本
+        _oo_version_bump(sid, rid, body_key8=body_key8, size=len(data), ext=ext, title=title)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, "新建文档入池失败：" + str(e))
     return {"ok": True, "rid": rid, "title": title, "doc_type": dt,
             "file_type": ext.lstrip("."), "size": len(data)}
+
+
+class OORollbackReq(BaseModel):
+    rid: str = ""
+    body_key8: str = ""
+
+
+def _oo_version_rows(sid, rid):
+    """汇总某文档的版本历史（后端事实，前端只消费当前版本那一条）。
+
+    来源：_oo_state.json 的 version_log（权威记录） + 资源池物理目录（兜底兼容
+    state 丢失/老数据）。每条带 physical_exists 与 is_current，前端据此标记。
+    """
+    log = ((_oo_state(sid).get("version_log") or {}).get(rid) or [])
+    res_dir = os.path.join(RESOURCES_DIR, rid)
+    # 物理目录兜底：state 里没有但池里有（例如早期版本、state 被重置）
+    have = {str(e.get("body_key8") or "") for e in log if e.get("body_key8")}
+    if os.path.isdir(res_dir):
+        for sub in sorted(os.listdir(res_dir)):
+            sd = os.path.join(res_dir, sub)
+            if not os.path.isdir(sd) or sub in have:
+                continue
+            main, _extra = _pool_main_lookup(sd)
+            if not main or os.path.splitext(main)[1].lower() not in OFFICE_EXT:
+                continue
+            log.append({"v": 0, "body_key8": sub, "ts": int(os.path.getmtime(main)),
+                        "size": os.path.getsize(main), "ext": os.path.splitext(main)[1].lower(),
+                        "title": ""})
+    # 当前版本 = 活跃合集条目 rel_path 指向的 body_key8（单一指针，回滚改的就是它）
+    cur_bk = ""
+    for c in _sid_collections(sid):
+        if c.get("id") == "__trash__":
+            continue
+        for it in c.get("items", []):
+            if _rid_of_item(it) != rid:
+                continue
+            rp = (it.get("rel_path") or "").replace("\\", "/")
+            parts = rp.split("/")
+            if len(parts) >= 3 and parts[0] == "resources" and parts[1] == rid:
+                cur_bk = parts[2]
+            break
+        if cur_bk:
+            break
+    rows = []
+    for e in log:
+        bk = str(e.get("body_key8") or "")
+        main, _ex = _pool_main_lookup(os.path.join(res_dir, bk)) if bk else (None, [])
+        ext_val = e.get("ext") or (os.path.splitext(main)[1].lower() if main else "")
+        rows.append({
+            "v": int(e.get("v") or 0), "body_key8": bk,
+            "ts": int(e.get("ts") or 0), "size": int(e.get("size") or 0),
+            "ext": ext_val,
+            "title": e.get("title") or "",
+            "physical_exists": bool(main),
+            "is_current": bool(bk and bk == cur_bk),
+        })
+    rows.sort(key=lambda r: (r["v"], r["ts"]))
+    return rows
+
+
+@app.get("/api/oo/versions")
+def oo_versions(rid: str = "", sid: str = Depends(current_identity)):
+    """文档版本历史（只读）。仅本人文档；共享只读资源不给版本操作入口。"""
+    _oo_guard()
+    if not sid:
+        raise HTTPException(401, "需登录")
+    rid = (rid or "").strip()
+    if not rid:
+        raise HTTPException(400, "rid 必填")
+    if not _oo_main_path(sid, rid):
+        raise HTTPException(404, "资源不存在或不可编辑")
+    for c in _sid_collections(sid):
+        for it in c.get("items", []):
+            if _rid_of_item(it) == rid and it.get("shared"):
+                raise HTTPException(403, "共享资源只读")
+    return {"rid": rid, "versions": _oo_version_rows(sid, rid)}
+
+
+@app.get("/api/oo/versions/file")
+def oo_version_file(rid: str = "", body_key8: str = "", sid: str = Depends(current_identity)):
+    """下载指定历史版本的原文件（只读，仅本人文档）。共享只读资源不给。"""
+    _oo_guard()
+    if not sid:
+        raise HTTPException(401, "需登录")
+    rid = (rid or "").strip()
+    bk = (body_key8 or "").strip()
+    if not rid or not re.fullmatch(r"[0-9a-f]{8}", bk):
+        raise HTTPException(400, "参数不合法")
+    if not _oo_main_path(sid, rid):
+        raise HTTPException(404, "资源不存在")
+    for c in _sid_collections(sid):
+        for it in c.get("items", []):
+            if _rid_of_item(it) == rid and it.get("shared"):
+                raise HTTPException(403, "共享资源只读")
+    main, _ex = _pool_main_lookup(os.path.join(RESOURCES_DIR, rid, bk))
+    if not main or os.path.splitext(main)[1].lower() not in OFFICE_EXT:
+        raise HTTPException(404, "该版本不存在")
+    return FileResponse(main, filename=os.path.basename(main),
+                        media_type=_OO_MIME.get(os.path.splitext(main)[1].lower(),
+                                                "application/octet-stream"))
+
+
+@app.post("/api/oo/versions/rollback")
+def oo_rollback(req: OORollbackReq, sid: str = Depends(current_identity)):
+    """把指定历史版本设为当前版本（整体化：只换条目指针，不新增条目、不复制文件）。
+
+    version 计数不回退——编辑器 key 保持单调，避免与已见过的回调 key 撞车；
+    旧版本物理文件本就在资源池，回滚只是把 rel_path / body_key8 指过去。
+    """
+    _oo_guard()
+    if not sid:
+        raise HTTPException(401, "需登录")
+    rid = (req.rid or "").strip()
+    bk = (req.body_key8 or "").strip()
+    if not rid or not bk:
+        raise HTTPException(400, "rid 与 body_key8 必填")
+    if not re.fullmatch(r"[0-9a-f]{8}", bk):
+        raise HTTPException(400, "body_key8 格式不合法")
+    if not _oo_main_path(sid, rid):
+        raise HTTPException(404, "资源不存在或不可编辑")
+    main, _ex = _pool_main_lookup(os.path.join(RESOURCES_DIR, rid, bk))
+    if not main or os.path.splitext(main)[1].lower() not in OFFICE_EXT:
+        raise HTTPException(404, "该版本不存在或不是可编辑文档")
+    with _collections_txn():
+        cols = _sid_collections(sid)
+        hit = 0
+        for c in cols:
+            if c.get("id") == "__trash__":
+                continue
+            for it in c.get("items", []):
+                if _rid_of_item(it) != rid:
+                    continue
+                if it.get("shared"):
+                    raise HTTPException(403, "共享资源只读")
+                it["rel_path"] = os.path.relpath(main, DOWNLOADS).replace(os.sep, "/")
+                it["body_key8"] = bk
+                it["restored_version_at"] = int(time.time())
+                hit += 1
+        if not hit:
+            raise HTTPException(404, "无可用条目")
+        _save_collections()
+    return {"ok": True, "rid": rid, "body_key8": bk, "updated_items": hit}
 
 
 class LoginReq(BaseModel):
@@ -3831,10 +3991,11 @@ async def oo_callback(req: dict, request: Request, sid: str = Depends(current_id
         with open(staged, "wb") as w:
             w.write(raw)
         _ingest_into_pool(owner, rid, body_key8, staged, [], title,
-                          target_cid="default", content_sha256=h, source_type="office")
+                          target_cid="default", content_sha256=h, source_type="office",
+                          keep_versions=True)
         _oo_mark_key(owner, key)
-        _oo_version_bump(owner, rid)
-        print(f"[oo] 已回写 {len(raw)}B <- {key}", flush=True)
+        _oo_version_bump(owner, rid, body_key8=body_key8, size=len(raw), ext=ext, title=title)
+        print(f"[oo] 已回写 {len(raw)}B <- {key} (v{_oo_version_get(owner, rid)})", flush=True)
     except Exception as e:
         # 失败也回 0（非 0 编辑器会判定保存失败并反复重试）；但必须留痕，否则"存了没变"查无实据
         _oo_warn(f"回写失败: {type(e).__name__}: {e} | url={_rewrite_dl_host(dl_url)}", key)
@@ -5571,7 +5732,7 @@ def _recycle_unreferenced_body_dirs(rid, keep_body_key8):
 def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target_cid="default",
                       vid="", seq="", subtitle_source="", cover="", content_sha256="",
                       target_name="", source_type="video", url="",
-                      published_at="", content_type=""):
+                      published_at="", content_type="", keep_versions=False):
     """统一入池 + 登记合集引用（ingest / upload / import-dir / watcher 共用，见 RM-实施指引 §2）。
 
     去重（O3 治本，2026-10-20）：body_key8 已改为「文件内容哈希派生」，配合此处的内容级去重，
@@ -5659,7 +5820,10 @@ def _ingest_into_pool(owner, rid, body_key8, main_abs, extras_abs, title, target
     entry["meta"] = meta_candidate
     replaced_rel = _add_to_collection(owner, entry, target_cid, target_name)
     # R2（换内容回收，2026-10-21）：登记同 rid 下无引用的旧 body_key8 子目录到回收站（物理保留）。
-    _recycle_unreferenced_body_dirs(rid, body_key8)
+    # keep_versions=True（ONLYOFFICE 在线编辑）：旧版本属于「文件内部历史」，由 version_log
+    # 管理，不作为独立回收站条目——前端只认一个当前版本，删除也是 rid 级整体。
+    if not keep_versions:
+        _recycle_unreferenced_body_dirs(rid, body_key8)
     return rid, dedup_hit, rel_main, replaced_rel
 
 

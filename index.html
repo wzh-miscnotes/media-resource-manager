@@ -317,6 +317,7 @@
   .kind-tag.k-article{color:#1d9e75;background:rgba(29,158,117,.13)}
   .kind-tag.k-sub{color:#7c5cf6;background:rgba(124,92,246,.12)}
   .kind-tag.k-date{color:var(--sub);background:transparent;padding-left:0}
+  .ver-badge{display:inline-block;padding:1px 7px;border-radius:6px;font-size:11px;line-height:1.6;color:#8a5a00;background:#fff3d6}
   .src-link{display:block;width:100%;margin-top:4px;font-size:12px;color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .src-link a{color:#576b95;text-decoration:none}
   .src-link a:hover{text-decoration:underline}
@@ -633,6 +634,7 @@
             <div class="doc-acts">
               <button class="btn-primary btn-sm" id="playerDocEdit" onclick="openOnlyOffice(currentLibItem)">✎ 在线编辑</button>
               <a class="btn-ghost btn-sm" id="playerDocDl" href="#" download>⬇ 下载原文件</a>
+              <button class="btn-ghost btn-sm" id="playerDocVer" onclick="openOOVersions(currentLibItem)">🕘 版本历史</button>
             </div>
           </div>
           <div class="player-actions" id="playerActions" data-page-node-id="Jgjyd1l4J6qorCSsQ0hZ3i">
@@ -969,6 +971,18 @@
     </div>
   </div>
 
+  <!-- 文档版本历史（ONLYOFFICE）：rid 是一个文件，多版本只在后端，前端只显示/编辑当前版本 -->
+  <div class="modal-mask hidden" id="ooVerMask" onclick="if(event.target===this)closeOOVersions()">
+    <div class="modal" style="width:min(760px,96vw)">
+      <div class="modal-head">
+        <div class="mt">🕘 版本历史</div>
+        <span class="muted" style="font-size:12px" id="ooVerSub">一个文档 · 多版本 · 只有一个当前版本</span>
+        <button class="btn-ghost btn-sm" onclick="closeOOVersions()">关闭</button>
+      </div>
+      <div class="modal-body" id="ooVerBody"><div class="muted">加载中…</div></div>
+    </div>
+  </div>
+
   <!-- 只读分享页（/share/{token}） -->
   <div id="shareView" class="hidden" data-page-node-id="shareView">
     <div class="card share-page">
@@ -1016,6 +1030,7 @@
           <a id="plpDlArt" class="btn-ghost btn-sm hidden" href="#" download>⬇ 导出文章</a>
           <a id="plpDlDoc" class="btn-ghost btn-sm hidden" href="#" download>⬇ 下载文档</a>
           <button id="plpOoEdit" class="btn-ghost btn-sm hidden" onclick="openOnlyOffice(_ppItems[_ppIdx])">✎ 在线编辑</button>
+          <button id="plpOoVer" class="btn-ghost btn-sm hidden" onclick="openOOVersions(_ppItems[_ppIdx])">🕘 版本历史</button>
           <button id="plpAttach" class="btn-ghost btn-sm hidden" onclick="openAttachDialog(_ppItems[_ppIdx])">📎 补录字幕/封面</button>
           <button id="plpEditArt" class="btn-ghost btn-sm hidden" onclick="openArtEditorForItem(_ppItems[_ppIdx])" title="编辑这篇图文（归档文章将派生副本，原文不动）">✎ 编辑图文</button>
           <button id="plpFullBtn" class="btn-ghost btn-sm hidden" onclick="toggleArticleFullscreen('plpArticle')" title="全屏阅读，按 Esc 退出">⛶ 全屏阅读</button>
@@ -1035,6 +1050,7 @@
             <div class="doc-acts">
               <button class="btn-primary btn-sm" id="plpDocEdit" onclick="openOnlyOffice(_ppItems[_ppIdx])">✎ 在线编辑</button>
               <a class="btn-ghost btn-sm" id="plpDocDl" href="#" download>⬇ 下载原文件</a>
+              <button class="btn-ghost btn-sm" id="plpDocVer" onclick="openOOVersions(_ppItems[_ppIdx])">🕘 版本历史</button>
             </div>
             <p class="muted" style="font-size:12px;margin:14px 0 0">文档需要在 ONLYOFFICE 编辑器中查看与修改；下载原文件可在本地打开。</p>
           </div>
@@ -1465,7 +1481,8 @@ function _ooBtn(it, i){
   const dl = `<a class="pv-btn" href="${href}" download title="下载文档原文件"
     onclick="event.stopPropagation()">⬇ 下载文档</a>`;
   if(!_auth.oo_enabled || it.shared) return dl;
-  return `<button class="pv-btn" title="用 ONLYOFFICE 在线编辑（保存后派生新版本）" onclick="event.stopPropagation();openOnlyOffice(currentCollItems()[${i}])">✎ 在线编辑</button>` + dl;
+  return `<button class="pv-btn" title="用 ONLYOFFICE 在线编辑（保存后派生新版本）" onclick="event.stopPropagation();openOnlyOffice(currentCollItems()[${i}])">✎ 在线编辑</button>`
+    + `<button class="pv-btn" title="查看该文档的版本历史（可切换当前版本）" onclick="event.stopPropagation();openOOVersions(currentCollItems()[${i}])">🕘 版本</button>` + dl;
 }
 function openOnlyOffice(item){
   if(!item || !item.resource_id){ alert("该资源缺少 resource_id，无法在线编辑"); return; }
@@ -1488,8 +1505,78 @@ function _renderDocView(prefix, it, mediaUrl, canEdit){
   document.getElementById(prefix+"Meta").innerHTML = meta.join("");
   const editBtn = document.getElementById(prefix+"Edit");
   if(editBtn) editBtn.classList.toggle("hidden", !canEdit);
+  const verBtn = document.getElementById(prefix+"Ver");
+  if(verBtn) verBtn.classList.toggle("hidden", !canEdit);
   const dl = document.getElementById(prefix+"Dl");
   if(dl){ dl.href = mediaUrl; dl.download = (it.rel_path||"").split("/").pop() || "document"; }
+}
+
+/* ---- 文档版本历史（2026-11-26）----
+   语义：rid = 一个逻辑文件；多版本只在后端资源池，前端永远只显示/编辑「当前版本」。
+   回滚 = 换合集条目的 rel_path 指针，不新增条目、不复制文件、不回退版本号。 */
+let _ooVerItem = null;
+function _ridOfItem(it){
+  return (it && (it.resource_id || (()=>{
+    const m = /(?:^|\/)resources\/([^/]+)\//.exec(it && it.rel_path || "");
+    return m ? m[1] : "";
+  })())) || "";
+}
+async function openOOVersions(item){
+  if(!item){ alert("未找到文档条目"); return; }
+  const rid = _ridOfItem(item);
+  if(!rid){ alert("该文档缺少 resource_id，无法查看版本历史"); return; }
+  _ooVerItem = item;
+  const mask = document.getElementById("ooVerMask");
+  const box = document.getElementById("ooVerBody");
+  mask.classList.remove("hidden");
+  box.innerHTML = '<div class="muted">加载中…</div>';
+  try{
+    const r = await fetch("/api/oo/versions?rid=" + encodeURIComponent(rid));
+    if(!r.ok){ const e = await r.json().catch(()=>({})); box.innerHTML = `<div class="badge err" style="display:inline-block">${esc(e.detail||("加载失败 "+r.status))}</div>`; return; }
+    const j = await r.json();
+    document.getElementById("ooVerSub").textContent = (item.title||"文档") + ` · ${(j.versions||[]).length} 个版本 · 只有一个当前版本`;
+    renderOOVersions(j.versions||[]);
+  }catch(e){ box.innerHTML = `<div class="badge err" style="display:inline-block">${esc("加载失败："+e)}</div>`; }
+}
+function closeOOVersions(){ document.getElementById("ooVerMask").classList.add("hidden"); }
+function renderOOVersions(rows){
+  const box = document.getElementById("ooVerBody");
+  if(!rows.length){ box.innerHTML = '<div class="muted">暂无版本记录。</div>'; return; }
+  const fmt = (ts)=> ts ? new Date(ts*1000).toLocaleString("zh-CN",{hour12:false}) : "—";
+  const kb = (n)=> n ? (n>=1048576 ? (n/1048576).toFixed(1)+" MB" : Math.ceil(n/1024)+" KB") : "—";
+  const cur = rows.find(r=>r.is_current);
+  box.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:10px">
+      当前版本：<b>${cur ? ("v"+cur.v || cur.body_key8) : "未知"}</b> · 编辑与下载默认都作用于它；切到旧版后，它成为新的当前版本。</div>` +
+    rows.slice().reverse().map(r=>{
+      const bk = esc(r.body_key8);
+      const dlhref = "/api/oo/versions/file?rid=" + encodeURIComponent(_ridOfItem(_ooVerItem)) + "&body_key8=" + bk;
+      const dl = r.physical_exists
+        ? `<a class="btn-ghost btn-sm" href="${dlhref}" download onclick="event.stopPropagation()">⬇ 下载</a>`
+        : `<span class="badge err" style="display:inline-block">文件缺失</span>`;
+      const setCur = (r.is_current || !r.physical_exists)
+        ? `<span class="badge ok" style="display:inline-block">${r.is_current?"当前版本":"不可用"}</span>`
+        : `<button class="btn-primary btn-sm" onclick="event.stopPropagation();ooRollback('${bk}')">⇦ 设为当前</button>`;
+      return `<div style="border:1px solid ${r.is_current?'#1d9e75':'#e3e3e3'};border-radius:8px;padding:10px 12px;margin-bottom:10px${r.is_current?';background:#f2fbf7':''}">
+        <div style="font-weight:600">${r.v?("v"+r.v):"历史"} · ${esc(r.ext?r.ext.toUpperCase():"文档")}
+          ${r.is_current?'<span class="badge ok" style="display:inline-block;margin-left:6px">使用中</span>':''}</div>
+        <div class="muted" style="font-size:12px;margin:4px 0">${fmt(r.ts)} · ${kb(r.size)} · ${bk}</div>
+        <div style="display:flex;gap:8px;margin-top:6px">${dl}${setCur}</div>
+      </div>`;
+    }).join("");
+}
+async function ooRollback(bk){
+  if(!_ooVerItem){ return; }
+  const rid = _ridOfItem(_ooVerItem);
+  if(!confirm("把该版本设为当前版本？文档内容会切到这一版，之后编辑从它继续；其他版本仍保留。")) return;
+  try{
+    const r = await fetch("/api/oo/versions/rollback", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({rid, body_key8: bk})});
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok){ alert("回滚失败："+(j.detail||r.status)); return; }
+    closeOOVersions();
+    if(typeof loadLibrary === "function"){ await loadLibrary(); }
+    alert("已切换到该版本。");
+  }catch(e){ alert("回滚失败："+e); }
 }
 
 /* ---- 新建文档下拉（2026-11-25）----
@@ -1884,20 +1971,22 @@ async function renderTrashGrid(){
     empty.classList.add("hidden");
     grid.innerHTML = items.map((it)=>{
       const rid = esc(it.resource_id);
+      const bk = esc(it.body_key8||"");
       const tn = esc(it.title||rid);
       const snap = it.item_snapshot||{};
       const cover = snap.cover ? `<img class="thumb" src="/api/thumbnail-cache/${encodeURIComponent(snap.cover)}">` : `<div class="thumb-ph">无封面</div>`;
       const phys = it.physical_exists ? "物理✓" : "物理缺失";
+      const verTag = bk ? `<span class="ver-badge">旧版本 ${bk}</span>` : "";
       return `<div class="lib-card trash-card">
         ${cover}
         <div class="meta">
           <div class="t">${tn}</div>
-          <div class="kind-row">${_kindTags(snap)}</div>
+          <div class="kind-row">${verTag}${_kindTags(snap)}</div>
           <div class="sub"><span class="${it.physical_exists?'':'stale'}">${phys}</span> · 活跃引用 ${it.active_refs||0}</div>
         </div>
         <div class="trash-actions">
-          <button class="btn-primary btn-sm" onclick="event.stopPropagation();trashRestore('${rid}')">♻ 恢复</button>
-          <button class="btn-ghost btn-sm" style="color:#c0392b" onclick="event.stopPropagation();trashPurge('${rid}')">🗑 清理</button>
+          <button class="btn-primary btn-sm" onclick="event.stopPropagation();trashRestore('${rid}','${bk}')">♻ 恢复</button>
+          <button class="btn-ghost btn-sm" style="color:#c0392b" onclick="event.stopPropagation();trashPurge('${rid}','${bk}')">🗑 清理</button>
         </div>
       </div>`;
     }).join("");
@@ -1914,36 +2003,39 @@ function renderTrash(items){
   if(!items.length){ box.innerHTML = '<div class="muted">回收站是空的。</div>'; return; }
   box.innerHTML = items.map(it=>{
     const rid = esc(it.resource_id);
+    const bk = esc(it.body_key8||"");
     const tn = esc(it.title||rid);
     const from = esc(it.trashed_from||"");
     const ts = it.trashed_at ? new Date(it.trashed_at*1000).toLocaleString("zh-CN",{hour12:false}) : "";
     const phys = it.physical_exists ? "物理✓" : "物理缺失";
     const refs = it.active_refs||0;
     return `<div style="border:1px solid #e3e3e3;border-radius:8px;padding:10px 12px;margin-bottom:10px">
-      <div style="font-weight:600">${tn}</div>
+      <div style="font-weight:600">${tn}${bk?` <span class="ver-badge">旧版本 ${bk}</span>`:""}</div>
       <div class="muted" style="font-size:12px;margin:4px 0">rid ${rid} · 来自 ${from} · ${ts}</div>
       <div class="muted" style="font-size:12px">状态：${phys} · 当前活跃引用 ${refs}</div>
       <div style="margin-top:8px;display:flex;gap:8px">
-        <button class="btn-primary btn-sm" onclick="trashRestore('${rid}')">♻ 恢复</button>
-        <button class="btn-ghost btn-sm" style="color:#c0392b" onclick="trashPurge('${rid}')">🗑 永久清理</button>
+        <button class="btn-primary btn-sm" onclick="trashRestore('${rid}','${bk}')">♻ 恢复</button>
+        <button class="btn-ghost btn-sm" style="color:#c0392b" onclick="trashPurge('${rid}','${bk}')">🗑 永久清理</button>
       </div>
     </div>`;
   }).join("");
 }
-async function trashRestore(rid){
-  if(!confirm("恢复该资源？将在其原属用户默认合集重建引用（引用复活，文件本就保留）。")) return;
+async function trashRestore(rid, bk){
+  bk = bk||"";
+  if(!confirm(bk ? "恢复该旧版本？将重建一条指向该版本的引用（文件本就保留）。" : "恢复该资源？将在其原属用户默认合集重建引用（引用复活，文件本就保留）。")) return;
   try{
-    const r = await fetch("/api/trash/restore", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({rid})});
+    const r = await fetch("/api/trash/restore", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({rid, body_key8: bk})});
     const j = await r.json().catch(()=>({}));
     if(!r.ok){ alert("恢复失败："+(j.detail||r.status)); return; }
     alert("已恢复至：" + (j.target_sid||""));
     refreshAfterTrashOp();
   }catch(e){ alert("恢复失败："+e); }
 }
-async function trashPurge(rid){
-  if(!confirm("永久清理该资源？将物理删除资源池目录且不可恢复（文章 .md 默认保留）。")) return;
+async function trashPurge(rid, bk){
+  bk = bk||"";
+  if(!confirm(bk ? "永久清理该旧版本？仅删除该版本子目录，当前版本不受影响。" : "永久清理该资源？将物理删除整个 rid 目录（含全部版本）且不可恢复（文章 .md 默认保留）。")) return;
   try{
-    const r = await fetch("/api/trash/purge", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({rid})});
+    const r = await fetch("/api/trash/purge", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({rid, body_key8: bk})});
     const j = await r.json().catch(()=>({}));
     if(!r.ok){ alert("清理失败："+(j.detail||r.status)); return; }
     alert("已永久清理。");
@@ -4361,7 +4453,9 @@ async function showPlayPageItem(i){
       const el = document.getElementById(id); if(el) el.classList.add("hidden");
     });
     const canEdit = !!(_auth.oo_enabled && !it.shared);
-    ["plpOoEdit"].forEach(id=>document.getElementById(id).classList.toggle("hidden", !canEdit));
+    ["plpOoEdit","plpOoVer"].forEach(id=>{
+      const el = document.getElementById(id); if(el) el.classList.toggle("hidden", !canEdit);
+    });
     const topDocDl = document.getElementById("plpDlDoc");
     topDocDl.classList.remove("hidden");
     topDocDl.href = mediaUrl;
@@ -4375,7 +4469,9 @@ async function showPlayPageItem(i){
   }
   document.getElementById("plpDoc").classList.add("hidden");
   document.getElementById("plpDlDoc").classList.add("hidden");
-  document.getElementById("plpOoEdit").classList.add("hidden");
+  ["plpOoEdit","plpOoVer"].forEach(id=>{
+    const el = document.getElementById(id); if(el) el.classList.add("hidden");
+  });
   // 文章：与视频互斥，隐藏视频导出按钮，异步装正文
   if(_isArticle(it)){
     v.removeAttribute("src"); v.load(); v.classList.add("hidden");

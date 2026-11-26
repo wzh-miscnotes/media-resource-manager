@@ -123,3 +123,56 @@ baseurl 修正后，回调 url 的主机变成了公网域名。RM 以 host 网�
 - 网关：`main.py` 重建镜像并重启。
 - 文档服务：`docker-compose.yml` 增加回环端口映射。
 - RM：OO 相关变量集中到 `<部署目录>/rm_oo.env`（600），重建脚本改为 `--env-file` 读取，新增 `RM_OO_INTERNAL_BASE` 与固定 `RM_OO_SIGN_SECRET`（此前缺省，重启即换密钥，1 小时内的下载/回调票会全部失效）。
+
+## 2026-11-26 文档版本管理：rid 作为逻辑文件，多版本只在后端
+
+### 背景与语义修正
+
+上一版把「保存派生新版本」的旧版本当作独立条目塞进回收站，这是概念错位：
+- 后端其实早有版本计数（`.oo_state.json` 的 `versions`）与 `_v<N>` 编辑 key，只是前端零版本 UI；
+- 回收站按钮只传 `rid`、不传 `body_key8`，而后端 purge 缺省会 `rmtree` 整个 rid 目录——
+  对带版本的文档点「永久清理」会连同当前版本一起删掉，且不可恢复。
+
+按「一个 rid = 一个逻辑文件」重新定义：
+- 多版本只存在后端资源池（`resources/<rid>/<body_key8>/`）与 `version_log`；
+- 前端永远只显示、编辑「一个当前版本」，由合集条目的 `rel_path` 单点决定；
+- 删除是 rid 级整体操作（所有版本一起），不按版本拆开；
+- 旧版本**不再进回收站**，它是文件内部历史，不是独立垃圾。
+
+### 后端改动
+
+- `_oo_state.json` 新增 `version_log[rid] = [{v, body_key8, ts, size, ext, title}]`；
+  新建即记 v1，每次成功回写追加，`_oo_version_bump` 同时写计数与历史（同内容重复保存只更新时间、不重复占一条）。
+- `_ingest_into_pool` 加 `keep_versions` 开关：OO 新建/回写传 True，跳过
+  `_recycle_unreferenced_body_dirs`，旧版本不再成为回收站条目（其它资源类型行为不变）。
+- 新增三个端点（均仅本人文档、共享只读拒绝）：
+  - `GET /api/oo/versions?rid=`：版本列表，`version_log` 为权威、物理目录兜底兼容老文档，
+    每条带 `physical_exists` 与 `is_current`；
+  - `GET /api/oo/versions/file?rid=&body_key8=`：下载任意历史版本原文件；
+  - `POST /api/oo/versions/rollback`：**只换合集条目的 `rel_path`/`body_key8` 指针**，
+    不新增条目、不复制文件、不回退 version。回滚后编辑 key 继续单调（v1→v2→回滚→v3），
+    保证不会撞已见过的回调 key。
+
+### 前端改动
+
+- 文档卡片、播放页文档卡、弹窗文档卡各加「🕘 版本历史」入口（仅启用在线编辑且非共享时显示）。
+- 版本面板：列出全部版本、标记当前、显示时间/大小/扩展名；可下载任意版本、可「设为当前」（回滚）。
+- 回收站两处渲染与 `trashRestore` / `trashPurge` 补传 `body_key8`，旧版本条目显示 `旧版本 xxxx` 标签；
+  清理确认文案区分「单个旧版本」与「整个 rid（含全部版本）」，堵住误删当前版本的 bug。
+
+### 验证（真机，playwright + 真实网关会话，测试文档已清理）
+
+| 环节 | 结果 |
+|---|---|
+| 新建 → 打开两次 → 分别保存 | 2 个版本目录，`version_log` v1/v2，当前 = v2 |
+| 版本列表 API | 2 条，`is_current` 准确；物理缺失版本不误标 |
+| 回滚到 v1 | 200，`updated_items=1`；当前指针切到 v1，**版本数不变、合集条目数不变**（整体化成立） |
+| 回滚后再打开编辑 | key = `_v3`（单调，未与已见 key 撞车） |
+| 下载历史版本 v2 | 200 / 9294B；非法 `body_key8` → 404 |
+| 前端版本面板 | 2 行版本、1 个回滚按钮、「使用中」标记正确 |
+| 视频入口回归 | 播放页与弹窗仍走 `<video>`，文档卡不误显 |
+| 数据回归 | 测试文档 purge 物理删除、`left: []`，state 中版本记录与 seen_keys 已清 |
+
+### 部署注意
+
+`app.py` 改动需重启 `rm_app` 生效；`index.html` 为静态挂载，覆盖即生效。
