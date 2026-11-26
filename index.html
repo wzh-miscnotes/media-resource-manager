@@ -414,6 +414,20 @@
   .doc-view .doc-meta{font-size:12px;color:var(--sub);margin-top:6px;display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
   .doc-view .doc-acts{margin-top:20px;display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
   .doc-view .doc-acts a.btn-ghost{color:var(--text);text-decoration:none;display:inline-flex;align-items:center}
+  /* 文档只读预览（2026-11-26）：原地展开在信息卡下方，与按钮互斥排版 */
+  .doc-view .doc-preview{margin-top:22px;width:100%;text-align:left;max-height:60vh;overflow:auto;
+    border:1px solid var(--line);border-radius:10px;background:#fff;padding:14px 16px}
+  .doc-view .doc-preview.hidden{display:none}
+  .doc-preview .dp-h{font-size:12px;color:var(--sub);margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  .doc-preview table{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}
+  .doc-preview th,.doc-preview td{border:1px solid var(--line);padding:5px 8px;vertical-align:top;word-break:break-word;max-width:320px}
+  .doc-preview th{background:#f5f6f8;text-align:center;color:var(--sub);font-weight:600}
+  .doc-preview .dp-sheet{margin-bottom:18px}
+  .doc-preview .dp-sheet-t{font-weight:600;font-size:13px;margin-bottom:6px}
+  .doc-preview .dp-line{font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word;padding:2px 0}
+  .doc-preview .dp-slide{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:12px;background:#fafbfc}
+  .doc-preview .dp-slide-t{font-size:12px;color:var(--sub);margin-bottom:6px}
+  .doc-preview iframe{width:100%;height:56vh;border:0;border-radius:8px;background:#f5f6f8}
   .play-side{width:320px;flex:none;border:1px solid var(--line);border-radius:12px;padding:12px;
     background:#fafbfc;display:flex;flex-direction:column;max-height:calc(100vh - 40px);
     position:sticky;top:20px}
@@ -557,6 +571,7 @@
     <div class="tab active" id="tabAll" onclick="switchTab('all')" data-page-node-id="AHwukLByaaYe0T3p5xl1Fy">🗂 全部</div>
     <div class="tab" id="tabVideo" onclick="switchTab('video')">📹 视频库</div>
     <div class="tab" id="tabArticle" onclick="switchTab('article')">📄 图文库</div>
+    <div class="tab" id="tabOffice" onclick="switchTab('office')">📊 文档库</div>
     <span class="spacer"></span>
     <button class="nav-act" id="btnTrash" onclick="openTrash()" title="回收站（引用归零的资源，物理保留，可清理/恢复）">♻ 回收站</button>
   </nav>
@@ -611,6 +626,7 @@
         <span class="spacer" data-page-node-id="iihDijng3N6hiBOR86m5Ry"></span>
         <select id="libMoveTarget" title="选择目标合集" data-page-node-id="IdYhLPYm4U2biuVBlLcIH6"></select>
         <button class="btn-ghost btn-sm" onclick="batchMove()" data-page-node-id="VmcwBrYbo99AxNkQrD5FF8">移动到</button>
+        <button class="btn-ghost btn-sm" id="btnDownloadSel" onclick="batchDownload()" title="选中 1 个直接下载原文件；选中多个打包成 zip（视频/图文/文档通用）">⬇ 下载选中</button>
         <button class="btn-ghost btn-sm" id="btnGenArticles" onclick="batchGenArticles()" title="对选中的视频逐个生成图文（本地模型串行执行，已有文章的自动跳过）">✍️ 生成图文</button>
         <button class="btn-ghost btn-sm" id="btnDelArticles" onclick="batchDeleteArticles()" title="删除选中视频关联的已生成图文（不影响视频与字幕文件）">🧹 删除已生成</button>
         <button class="btn-ghost btn-sm" id="btnArtImgImport" onclick="batchImportArticleImages()" title="把选中图文的正文图片与封面复制成你的图片资产（视频自动忽略；内容相同不会重复保存）">🖼️ 图片入库</button>
@@ -645,6 +661,7 @@
               <a class="btn-ghost btn-sm" id="playerDocDl" href="#" download>⬇ 下载原文件</a>
               <button class="btn-ghost btn-sm" id="playerDocVer" onclick="openOOVersions(currentLibItem)">🕘 版本历史</button>
             </div>
+            <div class="doc-preview hidden" id="playerDocPreview"></div>
           </div>
           <div class="player-actions" id="playerActions" data-page-node-id="Jgjyd1l4J6qorCSsQ0hZ3i">
             <a id="dlVideoBtn" class="btn-ghost btn-sm" href="#" download data-page-node-id="dVp7a9Je6j4vkt7VAxaCcT">⬇ 保存视频</a>
@@ -1061,7 +1078,7 @@
               <a class="btn-ghost btn-sm" id="plpDocDl" href="#" download>⬇ 下载原文件</a>
               <button class="btn-ghost btn-sm" id="plpDocVer" onclick="openOOVersions(_ppItems[_ppIdx])">🕘 版本历史</button>
             </div>
-            <p class="muted" style="font-size:12px;margin:14px 0 0">文档需要在 ONLYOFFICE 编辑器中查看与修改；下载原文件可在本地打开。</p>
+            <div class="doc-preview hidden" id="plpDocPreview"></div>
           </div>
           <div id="plpExtras"></div>
         </div>
@@ -1209,12 +1226,12 @@ let currentLibItem = null;
 let _libProgBound = false;
 let _sel = new Set();   // 当前选中的视频 rel_path 集合（批量操作用）
 
-/* 三个 tab 只做「类型筛选」，合集下拉与数据完全共用（2026-11-24）。
-   _libKind: all | video | article，默认 all（等同原「我的媒体库」的全量视图）。 */
+/* 四个 tab 只做「类型筛选」，合集下拉与数据完全共用（2026-11-24 三态，11-26 加文档库）。
+   _libKind: all | video | article | office，默认 all（等同原「我的媒体库」的全量视图）。 */
 let _libKind = "all";
 function switchTab(kind){
-  _libKind = (kind === "video" || kind === "article") ? kind : "all";
-  ["All","Video","Article"].forEach(k=>{
+  _libKind = (kind === "video" || kind === "article" || kind === "office") ? kind : "all";
+  ["All","Video","Article","Office"].forEach(k=>{
     const el = document.getElementById("tab" + k);
     if(el) el.classList.toggle("active", k.toLowerCase() === _libKind);
   });
@@ -1223,10 +1240,14 @@ function switchTab(kind){
   _applyKindUI();                // 先收敛工具条再拉数据，避免视频按钮在图文库里闪一帧
   loadLibrary();
 }
-/* 按当前 tab 过滤条目。_isArticle 双判兼容老数据/回收站快照（见上文）。 */
+/* 按当前 tab 过滤条目。_isArticle 双判兼容老数据/回收站快照（见上文）。
+   office 用 _isOffice（media_type/source_type 双判）；文档库只留 office，
+   video/article 两库仍按 article 二值过滤（office 落 video 库会互相污染，故各自排除）。 */
 function _filterByKind(items){
   if(_libKind === "all") return items;
-  return (items||[]).filter(it => _isArticle(it) === (_libKind === "article"));
+  if(_libKind === "office") return (items||[]).filter(it => _isOffice(it));
+  if(_libKind === "video") return (items||[]).filter(it => !_isArticle(it) && !_isOffice(it));
+  return (items||[]).filter(it => _isArticle(it));
 }
 
 /* ===== 工具条按 tab 收敛（视频专用 / 图文专用互斥显隐，共用项始终保留） =====
@@ -1235,16 +1256,20 @@ function _filterByKind(items){
    共用项（合集、移动到、全选、删除选中、我的共享…）与类型无关，两库都保留。 */
 const _VID_TOOLS = ["btnUpload", "btnImportDir", "btnPending", "btnGenArticles", "btnDelArticles"];
 const _ART_TOOLS = ["btnNewArticle", "btnArtImgImport"];
+// 文档库只留新建文档 + 上传/导入/删除等共用项；视频/图文专用工具都隐藏
+const _VID_ONLY = ["btnPending", "btnGenArticles", "btnDelArticles"];
+const _ART_ONLY = ["btnNewArticle", "btnArtImgImport"];
 function _applyKindUI(){
-  const isVid = _libKind === "video", isArt = _libKind === "article";
+  const isVid = _libKind === "video", isArt = _libKind === "article", isOffice = _libKind === "office";
   _VID_TOOLS.forEach(id=>{
     const el = document.getElementById(id);
-    if(el) el.classList.toggle("hidden", isArt);
+    if(el) el.classList.toggle("hidden", isArt || isOffice);
   });
   _ART_TOOLS.forEach(id=>{
     const el = document.getElementById(id);
-    if(el) el.classList.toggle("hidden", isVid);
+    if(el) el.classList.toggle("hidden", isVid || isOffice);
   });
+  // 新建文档入口沿用 _applyOOUI 按 oo_enabled 的显隐，不在此处改写
 }
 
 /* 统计选中项里视频/图文各几个。优先用条目上的 media_type（_isArticle 权威口径），
@@ -1321,7 +1346,8 @@ async function renderLibGrid(){
   const items = _filterByKind(coll.items);   // 当前 tab 的类型筛选结果；卡片下标 i 以此为基准
   const grid = document.getElementById("libGrid");
   const empty = document.getElementById("libEmpty");
-  const kindLabel = _libKind === "video" ? "个视频" : (_libKind === "article" ? "篇图文" : "条资源");
+  const kindLabel = _libKind === "video" ? "个视频"
+    : (_libKind === "article" ? "篇图文" : (_libKind === "office" ? "份文档" : "条资源"));
   document.getElementById("libCount").textContent = isTrash
     ? `回收站 ${coll.items.length} 个`
     : `共 ${items.length} ${kindLabel}`;
@@ -1349,6 +1375,8 @@ async function renderLibGrid(){
     ? "该合集下没有视频（图文已归到「图文库」）。"
     : _libKind === "article"
     ? "该合集下没有图文（视频已归到「视频库」）。"
+    : _libKind === "office"
+    ? "该合集下没有文档（视频/图文已归到各自库）。可「＋ 新建文档」或上传 Office 文件。"
     : "该合集还没有内容。可上传或目录导入后，会自动收录到这里。";
   if(isTrash){ await renderTrashGrid(); return; }
   if(!items.length){
@@ -1414,6 +1442,7 @@ async function renderLibGrid(){
       </div>`;
     }
     const isArt = _isArticle(it);
+    const isOffice = _isOffice(it);
     // 文章卡片不显示时长 / 字幕来源 / OCR 入口（这些是视频专属），改显示类型与日期标签
     const dur = (!isArt && it.duration) ? `<span>${fmtDur(it.duration)}</span>` : "";
     const stale = it.stale ? `<span class="stale">文件缺失</span>` : "";
@@ -1433,7 +1462,8 @@ async function renderLibGrid(){
     // 注：artBtn / arts / artBlock 已在上方（isShared 之前）统一定义，此处两个分支共用，不再重复声明
     const ocrBtnTop = it.subtitle ? 76 : 42;
     // data-rid 供「识别中」占用态使用：有任务在跑时据此高亮对应卡片、禁用其它卡片按钮
-    const ocrBtn = (isArt || it.shared || isOfficial) ? "" : (it.subtitle
+    // office 文档同样不显示：识别字幕是给无官方字幕的视频用的，文档没有字幕概念
+    const ocrBtn = (isArt || isOffice || it.shared || isOfficial) ? "" : (it.subtitle
       ? `<button class="share-btn ocr-btn" data-rid="${esc(it.resource_id||"")}" style="top:${ocrBtnTop}px" title="重新识别内嵌硬字幕（会覆盖现有字幕文件；可选择识别密度）" onclick="event.stopPropagation();rerunOcrSubtitle(${i})">🔄 重新识别</button>`
       : `<button class="share-btn ocr-btn" data-rid="${esc(it.resource_id||"")}" style="top:${ocrBtnTop}px" title="识别视频内嵌的硬字幕（需视频本身带字幕条；可选择识别密度）" onclick="event.stopPropagation();runOcrSubtitle(${i})">🔤 识别字幕</button>`);
     return `<div class="lib-card${picked}" onclick="openPlayerTab(${i})">
@@ -1507,16 +1537,13 @@ function _coverHTML(it){
   }
   return `<div class="thumb-ph">无封面</div>`;
 }
+/* 文档卡片按钮：下载统一到顶部批量栏（与视频/图文一致），此处只留编辑/版本。
+   共享只读文档不给编辑；单文件下载仍可从播放页 doc-view「下载原文件」进入。
+   参数 i 保留（兼容调用点签名），本函数已不再按 index 取条目。 */
 function _ooBtn(it, i){
-  if(!_isOffice(it)) return "";
-  // 下载原文件：不依赖 oo_enabled（即使没启用在线编辑，文档也该能从列表页取回）
-  const href = "/api/files/" + encodeURI(it.rel_path || "")
-    + (it.share_token ? ("?share=" + encodeURIComponent(it.share_token)) : "");
-  const dl = `<a class="pv-btn" href="${href}" download title="下载文档原文件"
-    onclick="event.stopPropagation()">⬇ 下载</a>`;
-  if(!_auth.oo_enabled || it.shared) return dl;
+  if(!_isOffice(it) || !_auth.oo_enabled || it.shared) return "";
   return `<button class="pv-btn" title="用 ONLYOFFICE 在线编辑（保存后派生新版本）" onclick="event.stopPropagation();openOnlyOffice(currentCollItems()[${i}])">✎ 编辑</button>`
-    + `<button class="pv-btn" title="查看该文档的版本历史（可切换当前版本）" onclick="event.stopPropagation();openOOVersions(currentCollItems()[${i}])">🕘 版本</button>` + dl;
+    + `<button class="pv-btn" title="查看该文档的版本历史（可切换当前版本）" onclick="event.stopPropagation();openOOVersions(currentCollItems()[${i}])">🕘 版本</button>`;
 }
 function openOnlyOffice(item){
   if(!item || !item.resource_id){ alert("该资源缺少 resource_id，无法在线编辑"); return; }
@@ -1543,7 +1570,47 @@ function _renderDocView(prefix, it, mediaUrl, canEdit){
   if(verBtn) verBtn.classList.toggle("hidden", !canEdit);
   const dl = document.getElementById(prefix+"Dl");
   if(dl){ dl.href = mediaUrl; dl.download = (it.rel_path||"").split("/").pop() || "document"; }
+  _loadDocPreview(prefix, it, mediaUrl);
 }
+
+/* 只读预览渲染（2026-11-26）：拉 /api/oo/preview 拿结构化内容，原地展开。
+   xlsx→表格 / docx→段落 / pptx→逐页文本 / pdf→iframe 内嵌原文件。
+   共享文档或无 rid 时静默降级为提示，不阻断编辑/下载入口。 */
+async function _loadDocPreview(prefix, it, mediaUrl){
+  const box = document.getElementById(prefix+"Preview");
+  if(!box) return;
+  box.classList.remove("hidden");
+  box.innerHTML = '<div class="muted">正在加载内容预览…</div>';
+  const rid = _ridOfItem(it);
+  if(!rid){ box.innerHTML = '<div class="muted">该资源缺少 rid，无法预览内容。</div>'; return; }
+  try{
+    const r = await fetch("/api/oo/preview?rid=" + encodeURIComponent(rid));
+    if(!r.ok){ box.innerHTML = '<div class="muted">内容预览不可用（' + (r.status===404?"资源不可见或共享只读":"加载失败") + '）。仍可在线编辑或下载原文件。</div>'; return; }
+    const j = await r.json();
+    if(j.kind === "pdf"){
+      box.innerHTML = '<div class="dp-h">PDF 预览（浏览器内嵌）</div><iframe src="' + esc(mediaUrl) + '" title="PDF 预览"></iframe>';
+    } else if(j.kind === "sheet"){
+      const sheets = (j.data||[]).map(s=>{
+        const rows = (s.rows||[]);
+        if(!rows.length) return `<div class="dp-sheet"><div class="dp-sheet-t">${esc(s.name)} · 空表</div></div>`;
+        const head = `<tr><th>#</th>${rows[0].map((_,c)=>`<th>${String.fromCharCode(65+c)}</th>`).join("")}</tr>`;
+        const body = rows.map((row,ri)=>`<tr><th>${ri+1}</th>${row.map(cell=>`<td>${esc(cell)}</td>`).join("")}</tr>`).join("");
+        return `<div class="dp-sheet"><div class="dp-sheet-t">${esc(s.name)} · ${rows.length} 行</div><table>${head}${body}</table></div>`;
+      }).join("");
+      box.innerHTML = '<div class="dp-h">只读预览 · 表格内容（最多 200 行 / 40 列，样式不保留）</div>' + (sheets||'<div class="muted">空文档</div>');
+    } else if(j.kind === "doc"){
+      const lines = (j.data||[]).map(x=>`<div class="dp-line">${esc(x)}</div>`).join("");
+      box.innerHTML = '<div class="dp-h">只读预览 · 正文文本（样式不保留）</div>' + (lines||'<div class="muted">空文档</div>');
+    } else if(j.kind === "slides"){
+      const slides = (j.data||[]).map((lines,i)=>`<div class="dp-slide"><div class="dp-slide-t">第 ${i+1} 页</div>${lines.map(x=>`<div class="dp-line">${esc(x)}</div>`).join("")}</div>`).join("");
+      box.innerHTML = '<div class="dp-h">只读预览 · 幻灯片文本（样式不保留）</div>' + (slides||'<div class="muted">空演示</div>');
+    } else {
+      box.innerHTML = '<div class="muted">该格式暂不支持内容预览（' + esc(extLabel(it)) + '），可下载原文件在本地打开。</div>';
+    }
+  }catch(e){ box.innerHTML = '<div class="muted">内容预览加载失败：' + esc(e.message) + '</div>'; }
+}
+function extLabel(it){ return ((it.rel_path||"").split(".").pop()||"文件").toUpperCase(); }
+
 
 /* ---- 文档版本历史（2026-11-26）----
    语义：rid = 一个逻辑文件；多版本只在后端资源池，前端永远只显示/编辑「当前版本」。
@@ -1654,8 +1721,8 @@ async function createOODoc(docType){
     ocrToast("已创建「" + (j.title || "未命名" + label) + "」，正在打开编辑器…", "ok");
     const w = window.open("/office/edit?rid=" + encodeURIComponent(j.rid), "_blank");
     if(!w) ocrToast("弹窗被浏览器拦截，请允许本站弹窗后重试", "warn");
-    // office 条目不属于 article，图文 tab 下会被 _filterByKind 过滤掉 → 切回「全部」再刷新
-    if(_libKind !== "all") switchTab("all"); else loadLibrary();
+    // 新建的 office 条目在 video/article 库会被过滤掉 → 切到「文档库」再刷新
+    if(_libKind !== "office") switchTab("office"); else loadLibrary();
   }catch(e){
     ocrToast("新建失败：" + e.message, "err");
   }finally{
@@ -1856,6 +1923,40 @@ function updateBatchBar(){
   const total = currentCollItems().length;
   if(selAll){ selAll.checked = (total>0 && n===total); selAll.indeterminate = (n>0 && n<total); }
   _refreshBatchBtns();   // 专用按钮按选中项类型置灰（仅「全部」tab 需要）
+}
+/* 统一下载（2026-11-26）：单选直接下原文件，多选打包 zip。视频/图文/文档通用。
+   单选走 /api/files/<rel>（与视频播放页同源，带 share token）；多选走后端打包端点。
+   后端按用户可见合集校验 rid，越权/失效文件会被跳过，全部无权限时返回 404。 */
+async function batchDownload(){
+  const rels = [..._sel];
+  if(!rels.length){ alert("请先勾选要下载的资源"); return; }
+  const byRel = new Map((currentCollItems()||[]).map(it=>[it.rel_path, it]));
+  if(rels.length === 1){
+    const rel = rels[0];
+    const it = byRel.get(rel) || {};
+    const shareQ = it.share_token ? ("?share=" + encodeURIComponent(it.share_token)) : "";
+    location.href = "/api/files/" + encodeURI(rel) + shareQ;
+    return;
+  }
+  const btn = document.getElementById("btnDownloadSel");
+  if(btn){ btn.disabled = true; btn.textContent = "打包中…"; }
+  try{
+    const r = await fetch("/api/files/download-zip", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({rel_paths: rels}),
+    });
+    if(!r.ok){
+      const e = await r.json().catch(()=>({}));
+      alert("打包失败：" + (e.detail || r.status)); return;
+    }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "media-download.zip";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 3000);
+  }catch(e){ alert("打包失败：" + e.message); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = "⬇ 下载选中"; } }
 }
 async function batchMove(){
   const target = document.getElementById("libMoveTarget").value;

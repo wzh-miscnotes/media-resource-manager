@@ -52,7 +52,7 @@ from html.parser import HTMLParser
 
 from fastapi import Depends, FastAPI, HTTPException, Header, Request, UploadFile, File, Form
 
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from pydantic import BaseModel
 
@@ -1780,6 +1780,62 @@ def serve_file(name: str, share: str = None, sid: str = Depends(current_identity
     return FileResponse(path, filename=os.path.basename(path))
 
 
+class DownloadZipReq(BaseModel):
+    rel_paths: list = []
+
+
+@app.post("/api/files/download-zip")
+def download_zip(req: DownloadZipReq, sid: str = Depends(current_identity)):
+    """打包下载选中文件（视频/图文/文档通用）。
+
+    授权口径与 /api/files/{name} 资源池分支完全一致：仅放行 resources/ 前缀，
+    且该文件所属 rid 必须出现在请求者可见合集（排除 __trash__），防越权。
+    zip 内保留原文件名；同名文件加 (2)/(3) 后缀，避免覆盖。
+    """
+    if not sid:
+        raise HTTPException(403, "需登录后下载")
+    # 预先算出「该用户可见的所有 rid」，逐个文件复用，避免 N 次全量扫合集
+    visible_rids = set()
+    for c in _sid_collections(sid):
+        if c.get("id") == "__trash__":
+            continue
+        for it in c.get("items", []):
+            r = _rid_of_item(it)
+            if r:
+                visible_rids.add(r)
+
+    buf = io.BytesIO()
+    packed, used = [], {}
+    try:
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for raw in (req.rel_paths or []):
+                rel = str(raw or "").replace("\\", "/").strip()
+                if not rel.startswith("resources/"):
+                    continue
+                parts = rel.split("/")
+                if len(parts) < 3 or parts[1] not in visible_rids:
+                    continue
+                path = os.path.abspath(os.path.join(DOWNLOADS, rel))
+                if not path.startswith(os.path.abspath(DOWNLOADS)) or not os.path.isfile(path):
+                    continue
+                name = os.path.basename(path)
+                n = used.get(name, 0) + 1
+                used[name] = n
+                arcname = name if n == 1 else f"{os.path.splitext(name)[0]}({n}){os.path.splitext(name)[1]}"
+                zf.write(path, arcname)
+                packed.append(rel)
+    except Exception as e:
+        raise HTTPException(500, "打包失败：" + str(e))
+    if not packed:
+        raise HTTPException(404, "没有可下载的文件（需选中自己可见的资源）")
+    buf.seek(0)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="media-download.zip"'},
+    )
+
+
 # ==================== ONLYOFFICE 服务端接口（默认关闭）====================
 # 由文档服务容器服务端发起，不带浏览器 cookie —— 鉴权靠「可信网段 + 短期 HMAC 签名」。
 # 与 /api/files/{name:path} 的 share 分支完全隔离，不放宽其 sid 闸门。
@@ -1844,6 +1900,145 @@ def oo_file(rid: str, exp: int = 0, sig: str = "", email: str = "",
         raise HTTPException(413, "文件超过 50MB 限制")
     ext = os.path.splitext(path)[1].lower()
     return FileResponse(path, media_type=_OO_MIME.get(ext, "application/octet-stream"))
+
+
+# ===== 文档只读预览（2026-11-26）：标准库解析 OOXML，不引 openpyxl/python-docx =====
+_OO_NS_MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_OO_NS_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_OO_NS_P = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+_OO_NS_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+_OO_PREVIEW_MAX_ROWS = 200     # 防止大表格把浏览器撑爆
+_OO_PREVIEW_MAX_COLS = 40
+_OO_PREVIEW_MAX_CELLS = 20000
+
+
+def _oo_parse_xlsx(path):
+    """从 xlsx 提取 (sheet_name -> rows[][])。共享字符串 + inlineStr + 数值，跳过样式。"""
+    import xml.etree.ElementTree as ET
+    out = []
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            for si in root.findall(_OO_NS_MAIN + "si"):
+                shared.append("".join(t.text or "" for t in si.iter(_OO_NS_MAIN + "t")))
+        # 工作表顺序：优先 workbook.xml 的 sheet 次序
+        sheet_files = [n for n in names if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)]
+        sheet_files.sort(key=lambda n: int(re.search(r"sheet(\d+)", n).group(1)))
+        for sf in sheet_files:
+            try:
+                root = ET.fromstring(z.read(sf))
+            except ET.ParseError:
+                continue
+            rows = []
+            for row in root.iter(_OO_NS_MAIN + "row"):
+                if len(rows) >= _OO_PREVIEW_MAX_ROWS:
+                    break
+                cells = []
+                for c in row.findall(_OO_NS_MAIN + "c"):
+                    t = (c.get("t") or "").strip()
+                    v = c.find(_OO_NS_MAIN + "v")
+                    if t == "inlineStr":
+                        is_el = c.find(_OO_NS_MAIN + "is")
+                        txt = "".join(x.text or "" for x in is_el.iter(_OO_NS_MAIN + "t")) if is_el is not None else ""
+                    elif v is None:
+                        txt = ""
+                    elif t == "s":
+                        try:
+                            txt = shared[int(v.text or "0")]
+                        except (ValueError, IndexError):
+                            txt = ""
+                    else:
+                        txt = v.text or ""
+                    cells.append(txt)
+                    if len(cells) >= _OO_PREVIEW_MAX_COLS:
+                        break
+                rows.append(cells)
+            out.append({"name": sf.split("/")[-1].replace(".xml", ""), "rows": rows})
+    return out
+
+
+def _oo_parse_docx(path):
+    """从 docx 提取段落/表格文本，按文档顺序，保留换行。"""
+    import xml.etree.ElementTree as ET
+    with zipfile.ZipFile(path) as z:
+        if "word/document.xml" not in z.namelist():
+            return []
+        root = ET.fromstring(z.read("word/document.xml"))
+    lines = []
+    body = root.find(_OO_NS_W + "body")
+    if body is None:
+        return []
+    for el in body:
+        tag = el.tag
+        if tag == _OO_NS_W + "p":
+            txt = "".join(t.text or "" for t in el.iter(_OO_NS_W + "t"))
+            if txt.strip():
+                lines.append(txt)
+        elif tag == _OO_NS_W + "tbl":
+            for tr in el.iter(_OO_NS_W + "tr"):
+                cells = []
+                for tc in tr.findall(_OO_NS_W + "tc"):
+                    cells.append(" ".join(t.text or "" for t in tc.iter(_OO_NS_W + "t")))
+                if any(c.strip() for c in cells):
+                    lines.append(" | ".join(cells))
+        if len(lines) >= _OO_PREVIEW_MAX_ROWS:
+            break
+    return lines
+
+
+def _oo_parse_pptx(path):
+    """从 pptx 提取每页文本（按 slide 编号排序）。"""
+    import xml.etree.ElementTree as ET
+    slides = []
+    with zipfile.ZipFile(path) as z:
+        names = [n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+        names.sort(key=lambda n: int(re.search(r"slide(\d+)", n).group(1)))
+        for n in names:
+            try:
+                root = ET.fromstring(z.read(n))
+            except ET.ParseError:
+                continue
+            lines = []
+            for p in root.iter(_OO_NS_A + "p"):
+                txt = "".join(t.text or "" for t in p.iter(_OO_NS_A + "t"))
+                if txt.strip():
+                    lines.append(txt)
+                if len(lines) >= 80:
+                    break
+            slides.append(lines)
+    return slides
+
+
+@app.get("/api/oo/preview")
+def oo_preview(rid: str = "", sid: str = Depends(current_identity)):
+    """文档只读预览数据（本人/可见资源，与 /api/files 同口径授权）。
+
+    返回 JSON：{kind: sheet|doc|slides|pdf|unsupported, title, data}
+    sheet: [{name, rows}]；doc: [段落文本]；slides: [[页内文本]]；pdf 前端走 iframe。
+    """
+    _oo_guard()
+    if not sid:
+        raise HTTPException(403, "需登录")
+    rid = (rid or "").strip()
+    path = _oo_main_path(sid, rid)
+    if not path:
+        raise HTTPException(404, "资源不存在或不可编辑")
+    ext = os.path.splitext(path)[1].lower()
+    title = os.path.splitext(os.path.basename(path))[0]
+    if ext == ".pdf":
+        return {"kind": "pdf", "title": title, "data": None}
+    try:
+        if ext in (".xlsx",):
+            return {"kind": "sheet", "title": title, "data": _oo_parse_xlsx(path)}
+        if ext in (".docx",):
+            return {"kind": "doc", "title": title, "data": _oo_parse_docx(path)}
+        if ext in (".pptx",):
+            return {"kind": "slides", "title": title, "data": _oo_parse_pptx(path)}
+    except Exception as e:
+        raise HTTPException(422, "文档解析失败：" + str(e))
+    return {"kind": "unsupported", "title": title, "data": None}
 
 
 @app.get("/api/thumbnail-cache/{name:path}")
