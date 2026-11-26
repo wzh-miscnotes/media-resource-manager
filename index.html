@@ -238,12 +238,11 @@
      滚动容器内，本来就常驻，无需吸顶）。 */
   #libBatch{position:sticky;top:10px;z-index:25;
     box-shadow:0 6px 18px rgba(198,52,111,.10)}
-  /* 吸顶时：上方缝隙用卡片底色盖住（左右外扩到卡片边缘），顶部两角改直角，
-     否则滚过去的内容会从缝隙和圆角缺口透出来。
-     注意 bottom 要 +1px：百分比定位基于 padding box，不加会把栏自己的 1px 上边框也盖掉。 */
+  /* 吸顶时：上方缝隙用卡片底色盖住（左右外扩到卡片边缘）。
+     注意 bottom 要 +1px：百分比定位基于 padding box，不加会把栏自己的 1px 上边框也盖掉。
+     圆角保留（贴顶改直角不自然）；圆角外侧那点小三角与卡片同色，实测看不出，不再额外补块。 */
   #libBatch::before{content:"";position:absolute;left:-21px;right:-21px;bottom:calc(100% + 1px);
     height:12px;background:var(--card);pointer-events:none;display:none}
-  #libBatch.is-stuck{border-radius:0 0 12px 12px}
   #libBatch.is-stuck::before{display:block}
   @media(max-width:720px){ #libBatch{top:6px} }
   .lib-batch select{padding:7px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;
@@ -735,18 +734,21 @@
           <span class="muted" data-page-node-id="88TN6mD43PHjYXZHysrGRa">目标合集：</span>
           <select id="uploadTarget" data-page-node-id="P7dHRuDKQOgZGaJIxJXyDB"></select>
         </div>
-        <!-- 刻意不写 accept（2026-11-26 二次排查）：Windows 通用对话框会把一长串扩展名折叠成
-             唯一的「自定义文件 (*.mp4, *.mkv, …)」项，既没有别的类型可选，点这个下拉还要重新解析
-             几十个通配模式并重扫目录 → 表现就是卡死。去掉后对话框回到系统默认（所有文件），
-             选完由 doUpload 按白名单校验；需要按类型筛选时，在文件名框输入 *.xlsx 回车即可。
-             拖拽上传不受影响（同样走白名单）。 -->
-        <input type="file" id="uploadFiles" multiple data-page-node-id="i2iuMKgwQSjly3FuLz8JfC">
+        <!-- accept 用「纯 MIME、不夹扩展名」（2026-11-26 第三次调整）：
+             只要出现扩展名列表，Windows 通用对话框就把它们折叠成唯一的「自定义文件」项，
+             点该项要重新解析几十个通配模式并重扫目录 → 卡死。改用 MIME 后由系统生成
+             「视频文件 / 音频文件 / 图片文件 / PDF / Word / Excel / PowerPoint」等多个
+             具名类型项，既能过滤也不会触发自定义项。字幕（srt/vtt/ass/lrc）没有标准 MIME，
+             在「所有文件」里仍可选；最终由 doUpload 的扩展名白名单兜底校验。 -->
+        <input type="file" id="uploadFiles" multiple
+          accept="video/*,audio/*,image/*,text/plain,application/pdf,application/msword,application/vnd.ms-excel,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+          data-page-node-id="i2iuMKgwQSjly3FuLz8JfC">
         <div class="up-drop" id="upDropAll" title="把文件拖到这里，无需打开文件选择窗口">
           <span class="dicon">📥</span>
           <span class="dhint">或把文件 / 整个文件夹直接拖到这里</span><br>
           <span>视频、字幕、封面图、Word/Excel/PPT/PDF 都可以；绕开系统文件选择窗口</span>
         </div>
-        <p class="muted" style="margin:0" data-page-node-id="nlhF8g2OEpF9DKhrgbKQWa">可一次选择多个文件：视频与同名字幕自动配对；Office 文档按内容哈希独立入池，可在「文档库」在线编辑、改名、看版本。系统文件窗口不再按类型过滤（避免卡顿），选完后由页面校验，不支持的类型会被自动忽略；想只看某类文件时，在文件名框输入 <b>*.xlsx</b> 这样的通配符回车即可。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
+        <p class="muted" style="margin:0" data-page-node-id="nlhF8g2OEpF9DKhrgbKQWa">可一次选择多个文件：视频与同名字幕自动配对；Office 文档按内容哈希独立入池，可在「文档库」在线编辑、改名、看版本。文件窗口的「类型」下拉可按视频 / 图片 / PDF / Word / Excel / PPT 过滤；字幕（srt / vtt / ass / lrc）没有标准类型，切到「所有文件」即可选。选完由页面按后缀校验，不支持的类型会被自动忽略。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
         <div style="display:flex;gap:10px;align-items:center" data-page-node-id="sEfKPiEqomYAjFscxx01y4">
           <button class="btn-primary btn-sm" id="uploadBtn" onclick="doUpload()" data-page-node-id="VGUOfEplFV2GpknvppEQwH">开始上传</button>
           <span id="uploadMsg" class="muted" data-page-node-id="6CoTyHfP1pVMhEc1RvHImS"></span>
