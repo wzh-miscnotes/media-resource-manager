@@ -240,9 +240,10 @@
     box-shadow:0 6px 18px rgba(198,52,111,.10)}
   /* 吸顶时：上方缝隙用卡片底色盖住（左右外扩到卡片边缘）。
      注意 bottom 要 +1px：百分比定位基于 padding box，不加会把栏自己的 1px 上边框也盖掉。
-     圆角保留（贴顶改直角不自然）；圆角外侧那点小三角与卡片同色，实测看不出，不再额外补块。 */
+     贴顶时上方两角必须改直角：实测保留圆角会让卡片封面从两个角的缺口漏出来（用户截图确认）。 */
   #libBatch::before{content:"";position:absolute;left:-21px;right:-21px;bottom:calc(100% + 1px);
     height:12px;background:var(--card);pointer-events:none;display:none}
+  #libBatch.is-stuck{border-radius:0 0 12px 12px}
   #libBatch.is-stuck::before{display:block}
   @media(max-width:720px){ #libBatch{top:6px} }
   .lib-batch select{padding:7px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;
