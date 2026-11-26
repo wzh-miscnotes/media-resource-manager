@@ -317,6 +317,15 @@
   .kind-tag.k-article{color:#1d9e75;background:rgba(29,158,117,.13)}
   .kind-tag.k-sub{color:#7c5cf6;background:rgba(124,92,246,.12)}
   .kind-tag.k-date{color:var(--sub);background:transparent;padding-left:0}
+  /* 文档子类型标签（2026-11-26）：word/cell/slide/pdf 各自配色，与视频、图文区分 */
+  .kind-tag.k-doc-word{color:#1f5fbf;background:rgba(31,95,191,.12)}
+  .kind-tag.k-doc-cell{color:#12805c;background:rgba(18,128,92,.13)}
+  .kind-tag.k-doc-slide{color:#b7600e;background:rgba(183,96,14,.13)}
+  .kind-tag.k-doc-pdf{color:#c0392b;background:rgba(192,57,43,.12)}
+  /* Office 文档无封面时的类型图标占位（替代灰底「无封面」） */
+  .lib-card .thumb-ph.thumb-doc{flex-direction:column;gap:6px;background:linear-gradient(135deg,#eef2fb,#e4eaf6)}
+  .lib-card .doc-ph-icon{font-size:34px;line-height:1;filter:saturate(.9)}
+  .lib-card .doc-ph-ext{font-size:11px;letter-spacing:.08em;color:#8d97aa;font-weight:600}
   .ver-badge{display:inline-block;padding:1px 7px;border-radius:6px;font-size:11px;line-height:1.6;color:#8a5a00;background:#fff3d6}
   .src-link{display:block;width:100%;margin-top:4px;font-size:12px;color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .src-link a{color:#576b95;text-decoration:none}
@@ -433,9 +442,9 @@
     .play-side{width:auto;position:static;max-height:42vh}
   }
   /* 媒体库卡片：「弹窗预览」小按钮（与默认的「新标签打开」并存） */
-  .lib-card .pv-row{margin-top:6px;display:flex}
+  .lib-card .pv-row{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px}
   .lib-card .pv-btn{font-size:11.5px;padding:3px 8px;border:1px solid var(--line);border-radius:7px;
-    background:#fff;color:var(--text);cursor:pointer;line-height:1.4;white-space:nowrap}
+    background:#fff;color:var(--text);cursor:pointer;line-height:1.4;white-space:nowrap;text-decoration:none}
   .lib-card .pv-btn:hover{border-color:#f3b9cb;color:#c2185b}
 
   /* ===== 字幕 → 文章（LLM 生成） ===== */
@@ -1351,9 +1360,7 @@ async function renderLibGrid(){
   empty.classList.add("hidden");
   await loadArticleIndex();
   grid.innerHTML = items.map((it, i) => {
-    const cover = it.cover
-      ? `<img class="thumb" data-cover="1" src="/api/thumbnail-cache/${encodeURIComponent(it.cover)}">`
-      : `<div class="thumb-ph">无封面</div>`;
+    const cover = _coverHTML(it);
     // 只有绑定了字幕的视频才给「生成文章」入口（字幕是生成素材）；被共享视频同样可用
     const artBtn = it.subtitle
       ? `<button class="share-btn art-btn" title="用这篇字幕生成文章（LLM）" onclick="event.stopPropagation();openArticlePanel(${i})">✍️ 文章</button>`
@@ -1390,7 +1397,7 @@ async function renderLibGrid(){
       // 失效条目不给浏览入口（新标签 / 弹窗都点不动）
       const pvRow = b.dead ? "" : `<div class="pv-row"><button class="pv-btn"
              title="${isArt?"在当前页面弹窗里阅读正文（不跳转）":"在当前页面弹窗里快速预览（不跳转）"}"
-             onclick="event.stopPropagation();playLibItem(${i})">${isArt?"▢ 阅读正文":"▢ 弹窗预览"}</button>${_ooBtn(it, i)}</div>`;
+             onclick="event.stopPropagation();playLibItem(${i})">${isArt?"▢ 阅读":"▢ 预览"}</button>${_ooBtn(it, i)}</div>`;
       return `<div class="lib-card shared${b.dead?" sp-dead":""}" onclick="openPlayerTab(${i})">
         <span class="sp-status ${b.cls}">${b.text}</span>
         <button class="sp-remove" title="从「被共享」移出（不影响对方的文件）" onclick="event.stopPropagation();removeShared('${esc(it.share_token||"")}')">✕ 移出</button>
@@ -1442,7 +1449,7 @@ async function renderLibGrid(){
         <div class="kind-row">${_kindTags(it)}</div>
         <div class="sub">${dur}${subTag}${stale}</div>
         <div class="pv-row"><button class="pv-btn" title="${isArt?"在当前页面弹窗里阅读正文（不跳转）":"在当前页面弹窗里快速预览（不跳转）"}"
-          onclick="event.stopPropagation();playLibItem(${i})">${isArt?"▢ 阅读正文":"▢ 弹窗预览"}</button>${isArt
+          onclick="event.stopPropagation();playLibItem(${i})">${isArt?"▢ 阅读":"▢ 预览"}</button>${isArt
           ? `<button class="pv-btn" title="编辑这篇图文（归档文章派生副本，原文不动）" onclick="event.stopPropagation();openArtEditorForItem(currentCollItems()[${i}])">✎ 编辑</button>` : ""}${_ooBtn(it, i)}</div>
       </div>
       ${artBlock}
@@ -1473,15 +1480,42 @@ function _isArticle(it){
 function _isOffice(it){
   return !!(it && (it.media_type === "office" || it.source_type === "office"));
 }
+/* office 子类型：按 rel_path 扩展名细分文档/表格/演示/PDF（2026-11-26）。
+   新建文档 rel_path 形如 resources/<rid>/<body>/未命名表格.xlsx，扩展名可靠；
+   回收站快照、共享条目同样带 rel_path，无需后端新增字段。 */
+function _officeKind(it){
+  const ext = (((it && it.rel_path) || "").split(".").pop() || "").toLowerCase();
+  if(ext === "docx" || ext === "doc" || ext === "odt" || ext === "rtf")
+    return {ext, label:"文档", cls:"k-doc-word", icon:"📘"};
+  if(ext === "xlsx" || ext === "xls")
+    return {ext, label:"表格", cls:"k-doc-cell", icon:"📗"};
+  if(ext === "pptx" || ext === "ppt" || ext === "odp")
+    return {ext, label:"演示", cls:"k-doc-slide", icon:"📙"};
+  if(ext === "pdf")
+    return {ext, label:"PDF", cls:"k-doc-pdf", icon:"📕"};
+  return {ext, label:"文档", cls:"k-doc-word", icon:"📄"};
+}
+/* office 文档封面占位：有真实 cover 用图，否则按子类型给「图标 + 扩展名」占位，
+   与视频/文章的「无封面」灰底区分。缓存名需 encodeURIComponent，防止特殊字符 404。 */
+function _coverHTML(it){
+  if(it && it.cover)
+    return `<img class="thumb" data-cover="1" src="/api/thumbnail-cache/${encodeURIComponent(it.cover)}">`;
+  if(_isOffice(it)){
+    const k = _officeKind(it);
+    return `<div class="thumb-ph thumb-doc"><span class="doc-ph-icon">${k.icon}</span>`
+      + `<span class="doc-ph-ext">${esc((k.ext||"DOC").toUpperCase())}</span></div>`;
+  }
+  return `<div class="thumb-ph">无封面</div>`;
+}
 function _ooBtn(it, i){
   if(!_isOffice(it)) return "";
   // 下载原文件：不依赖 oo_enabled（即使没启用在线编辑，文档也该能从列表页取回）
   const href = "/api/files/" + encodeURI(it.rel_path || "")
     + (it.share_token ? ("?share=" + encodeURIComponent(it.share_token)) : "");
   const dl = `<a class="pv-btn" href="${href}" download title="下载文档原文件"
-    onclick="event.stopPropagation()">⬇ 下载文档</a>`;
+    onclick="event.stopPropagation()">⬇ 下载</a>`;
   if(!_auth.oo_enabled || it.shared) return dl;
-  return `<button class="pv-btn" title="用 ONLYOFFICE 在线编辑（保存后派生新版本）" onclick="event.stopPropagation();openOnlyOffice(currentCollItems()[${i}])">✎ 在线编辑</button>`
+  return `<button class="pv-btn" title="用 ONLYOFFICE 在线编辑（保存后派生新版本）" onclick="event.stopPropagation();openOnlyOffice(currentCollItems()[${i}])">✎ 编辑</button>`
     + `<button class="pv-btn" title="查看该文档的版本历史（可切换当前版本）" onclick="event.stopPropagation();openOOVersions(currentCollItems()[${i}])">🕘 版本</button>` + dl;
 }
 function openOnlyOffice(item){
@@ -1634,10 +1668,11 @@ function _applyOOUI(){
 }
 function _kindTags(it){
   const art = _isArticle(it);
+  const ok = _isOffice(it) ? _officeKind(it) : null;
   const big = art
     ? '<span class="kind-tag k-article">文章</span>'
-    : _isOffice(it)
-      ? '<span class="kind-tag k-article">文档</span>'
+    : ok
+      ? `<span class="kind-tag ${ok.cls}">${ok.label}</span>`
       : '<span class="kind-tag k-video">视频</span>';
   const ct = art && it.content_type
     ? `<span class="kind-tag k-sub">${esc(it.content_type)}</span>` : "";
@@ -1974,7 +2009,7 @@ async function renderTrashGrid(){
       const bk = esc(it.body_key8||"");
       const tn = esc(it.title||rid);
       const snap = it.item_snapshot||{};
-      const cover = snap.cover ? `<img class="thumb" src="/api/thumbnail-cache/${encodeURIComponent(snap.cover)}">` : `<div class="thumb-ph">无封面</div>`;
+      const cover = _coverHTML(snap);
       const phys = it.physical_exists ? "物理✓" : "物理缺失";
       const verTag = bk ? `<span class="ver-badge">旧版本 ${bk}</span>` : "";
       return `<div class="lib-card trash-card">
