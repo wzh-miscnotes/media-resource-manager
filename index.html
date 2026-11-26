@@ -589,6 +589,8 @@
         <button class="btn-ghost btn-sm" onclick="openShareList()" title="管理我生成的全部分享链接" data-page-node-id="shareListBtn">🔗 我的共享</button>
         <button class="btn-ghost btn-sm" id="btnPending" onclick="openPending()" title="查看未能自动匹配到资源的字幕/封面，可手动挂到资源或丢弃">📎 待补挂<span id="pendingBadge" class="hidden"></span></button>
         <button class="btn-ghost btn-sm" id="btnUpload" onclick="openUpload()" data-page-node-id="tSrfiE3LOHnTkdCjjSf8CI">⬆ 上传</button>
+        <!-- 文档上传独立入口（2026-11-26）：文档库 tab 才显示，accept 仅 office 后缀；视频上传链路完全不动 -->
+        <button class="btn-ghost btn-sm hidden" id="btnUploadDoc" onclick="openDocUpload()" title="上传 Word/Excel/PPT/PDF 等在线文档到当前合集">⬆ 上传文档</button>
         <button class="btn-ghost btn-sm" id="btnImportDir" onclick="openImportDir()" data-page-node-id="rmImportDir">📂 目录导入</button>
         <button class="btn-primary btn-sm" id="btnNewArticle" onclick="switchTab('article');openArtEditor()" title="用富文本编辑器新建图文（开源部署无需采集端）">✍️ 新建图文</button>
         <!-- ONLYOFFICE 新建文档：仅后端 oo_enabled=true 时显示，与「新建图文」并列且互不干扰 -->
@@ -712,6 +714,36 @@
           <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--sub);margin-top:4px">
             <span id="uploadProgressText">0%</span>
             <span id="uploadProgressSize">0 B / 0 B</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- 在线文档上传（2026-11-26）：与视频上传完全分离，accept 仅 OFFICE_EXT；
+       复用 /api/upload 的 office 分流链路（app.py 按内容哈希独立入池），不改视频上传任何代码。 -->
+  <div class="modal-mask hidden" id="docUploadMask" onclick="if(event.target===this)closeDocUpload()">
+    <div class="modal" style="width:min(560px,94vw);max-height:90vh">
+      <div class="modal-head">
+        <div class="mt">⬆ 上传在线文档</div>
+        <button class="btn-ghost btn-sm" onclick="closeDocUpload()">关闭</button>
+      </div>
+      <div class="modal-body" style="flex-direction:column;padding:14px;gap:12px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <span class="muted">目标合集：</span>
+          <select id="docUploadTarget"></select>
+        </div>
+        <input type="file" id="docUploadFiles" multiple
+          accept=".docx,.doc,.odt,.rtf,.xlsx,.xls,.ods,.csv,.pptx,.ppt,.odp,.pdf">
+        <p class="muted" style="margin:0">支持 Word / Excel / PPT / PDF / ODF / RTF / CSV 文档；可一次选多个，按内容哈希去重入库。上传后可到「文档库」在线编辑、改名、看版本历史。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
+        <div style="display:flex;gap:10px;align-items:center">
+          <button class="btn-primary btn-sm" id="docUploadBtn" onclick="doDocUpload()">开始上传</button>
+          <span id="docUploadMsg" class="muted"></span>
+        </div>
+        <div id="docUploadProgressWrap" class="hidden" style="width:100%">
+          <div class="bar" style="margin:0"><i id="docUploadProgressBar"></i></div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--sub);margin-top:4px">
+            <span id="docUploadProgressText">0%</span>
+            <span id="docUploadProgressSize">0 B / 0 B</span>
           </div>
         </div>
       </div>
@@ -1295,6 +1327,9 @@ function _applyKindUI(){
     const el = document.getElementById(id);
     if(el) el.classList.toggle("hidden", isVid || isOffice);
   });
+  // 上传入口按类型分流：文档库只显示「上传文档」，其余库只显示「上传（视频）」
+  const bUD = document.getElementById("btnUploadDoc");
+  if(bUD) bUD.classList.toggle("hidden", !isOffice);
   // 新建文档入口沿用 _applyOOUI 按 oo_enabled 的显隐，不在此处改写
 }
 
@@ -1389,6 +1424,11 @@ async function renderLibGrid(){
   if(bU){
     bU.disabled = isShared || isTrash; bU.style.opacity = (isShared||isTrash) ? .5 : 1;
     bU.title = isShared ? "「被共享」里的文件属于对方，不能在这里上传" : (isTrash ? "回收站为只读，不能上传" : "");
+  }
+  const bUDoc = document.getElementById("btnUploadDoc");
+  if(bUDoc){
+    bUDoc.disabled = isShared || isTrash; bUDoc.style.opacity = (isShared||isTrash) ? .5 : 1;
+    bUDoc.title = isShared ? "「被共享」里的文件属于对方，不能在这里上传" : (isTrash ? "回收站为只读，不能上传" : "上传 Word/Excel/PPT/PDF 等在线文档到当前合集");
   }
   const bP = document.getElementById("btnPruneShared");
   if(bP) bP.classList.toggle("hidden", !isShared);
@@ -3769,6 +3809,58 @@ async function doUpload(){
         if(j.skipped) parts.push(`跳过 ${j.skipped} 个`);
         msg.textContent = "上传完成：" + (parts.length ? parts.join("，") : "无变化");
         setTimeout(()=>{ closeUpload(); loadLibrary(); }, 600);
+      } else {
+        msg.textContent = "上传失败："+(j.detail||xhr.statusText||xhr.status);
+        pWrap.classList.add("hidden");
+      }
+      resolve();
+    });
+    xhr.addEventListener("error", () => { btn.disabled = false; msg.textContent = "上传出错：网络错误"; pWrap.classList.add("hidden"); resolve(); });
+    xhr.addEventListener("abort", () => { btn.disabled = false; msg.textContent = "上传已取消"; pWrap.classList.add("hidden"); resolve(); });
+    xhr.open("POST", "/api/upload");
+    xhr.send(fd);
+  });
+}
+
+/* ---- 在线文档上传（独立入口，2026-11-26）----
+   与视频上传完全隔离：独立 input/accept/弹窗/函数，后端同样走 /api/upload 的 office 分流。
+   这样视频链路（含 video/* 过滤、字幕配对）一行不改，文档也不会被视频过滤规则挡住。 */
+function openDocUpload(){ fillCollSelect(document.getElementById("docUploadTarget")); document.getElementById("docUploadMsg").textContent=""; document.getElementById("docUploadMask").classList.remove("hidden"); }
+function closeDocUpload(){ document.getElementById("docUploadMask").classList.add("hidden"); }
+async function doDocUpload(){
+  const target = document.getElementById("docUploadTarget").value;
+  const input = document.getElementById("docUploadFiles");
+  const msg = document.getElementById("docUploadMsg");
+  const btn = document.getElementById("docUploadBtn");
+  const pWrap = document.getElementById("docUploadProgressWrap");
+  const pBar = document.getElementById("docUploadProgressBar");
+  const pText = document.getElementById("docUploadProgressText");
+  const pSize = document.getElementById("docUploadProgressSize");
+  if(!input.files.length){ alert("请先选择要上传的文档"); return; }
+  const bad = Array.from(input.files).filter(f=>!/\.(docx?|odt|rtf|xls[xs]?|ods|csv|ppt[xs]?|odp|pdf)$/i.test(f.name||""));
+  if(bad.length){ alert("仅支持 Word/Excel/PPT/PDF/ODF/RTF/CSV 文档，以下文件被排除：\n" + bad.map(f=>f.name).join("\n")); return; }
+  const fd = new FormData();
+  fd.append("cid", target);
+  let total = 0;
+  for(const f of input.files){ fd.append("files", f); total += f.size; }
+  btn.disabled = true; msg.textContent = `上传中（${input.files.length} 个文档）…`;
+  pWrap.classList.remove("hidden"); pBar.style.width = "0%"; pText.textContent = "0%"; pSize.textContent = `0 B / ${fmtSize(total)}`;
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener("progress", (e) => {
+      if(!e.lengthComputable) return;
+      const pct = Math.min(100, Math.round(e.loaded * 100 / e.total));
+      pBar.style.width = pct + "%"; pText.textContent = pct + "%";
+      pSize.textContent = `${fmtSize(e.loaded)} / ${fmtSize(e.total)}`;
+    });
+    xhr.addEventListener("load", () => {
+      btn.disabled = false;
+      let j = {};
+      try{ j = JSON.parse(xhr.responseText || "{}"); }catch(_){}
+      if(xhr.status >= 200 && xhr.status < 300){
+        msg.textContent = "上传完成：新增 " + (j.added||0) + " 个文档" + (j.skipped ? "，跳过 " + j.skipped + " 个" : "");
+        input.value = "";
+        if(_libKind !== "office" && _libKind !== "all") switchTab("office"); else loadLibrary();
       } else {
         msg.textContent = "上传失败："+(j.detail||xhr.statusText||xhr.status);
         pWrap.classList.add("hidden");
