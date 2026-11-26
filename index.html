@@ -238,9 +238,10 @@
      滚动容器内，本来就常驻，无需吸顶）。 */
   #libBatch{position:sticky;top:10px;z-index:25;
     box-shadow:0 6px 18px rgba(198,52,111,.10)}
-  /* 吸顶时：上方 10px 缝隙用卡片底色盖住（左右外扩到卡片边缘），顶部两角改直角，
-     否则滚过去的内容会从缝隙和圆角缺口透出来。 */
-  #libBatch::before{content:"";position:absolute;left:-21px;right:-21px;bottom:100%;
+  /* 吸顶时：上方缝隙用卡片底色盖住（左右外扩到卡片边缘），顶部两角改直角，
+     否则滚过去的内容会从缝隙和圆角缺口透出来。
+     注意 bottom 要 +1px：百分比定位基于 padding box，不加会把栏自己的 1px 上边框也盖掉。 */
+  #libBatch::before{content:"";position:absolute;left:-21px;right:-21px;bottom:calc(100% + 1px);
     height:12px;background:var(--card);pointer-events:none;display:none}
   #libBatch.is-stuck{border-radius:0 0 12px 12px}
   #libBatch.is-stuck::before{display:block}
@@ -734,16 +735,18 @@
           <span class="muted" data-page-node-id="88TN6mD43PHjYXZHysrGRa">目标合集：</span>
           <select id="uploadTarget" data-page-node-id="P7dHRuDKQOgZGaJIxJXyDB"></select>
         </div>
-        <!-- accept 只用纯后缀、不写 video/* 之类 MIME 通配：Windows 文件对话框对「唯一的自定义
-             类型」展开枚举很慢（大王定位的卡顿源），纯后缀列表会生成「自定义 + 所有文件」两项，点下拉不卡 -->
-        <input type="file" id="uploadFiles" multiple
-          accept=".mp4,.mkv,.webm,.flv,.mov,.m4a,.mp3,.aac,.srt,.vtt,.ass,.lrc,.txt,.jpg,.jpeg,.png,.webp,.json,.doc,.docx,.odt,.rtf,.xls,.xlsx,.ods,.csv,.ppt,.pptx,.odp,.pdf" data-page-node-id="i2iuMKgwQSjly3FuLz8JfC">
+        <!-- 刻意不写 accept（2026-11-26 二次排查）：Windows 通用对话框会把一长串扩展名折叠成
+             唯一的「自定义文件 (*.mp4, *.mkv, …)」项，既没有别的类型可选，点这个下拉还要重新解析
+             几十个通配模式并重扫目录 → 表现就是卡死。去掉后对话框回到系统默认（所有文件），
+             选完由 doUpload 按白名单校验；需要按类型筛选时，在文件名框输入 *.xlsx 回车即可。
+             拖拽上传不受影响（同样走白名单）。 -->
+        <input type="file" id="uploadFiles" multiple data-page-node-id="i2iuMKgwQSjly3FuLz8JfC">
         <div class="up-drop" id="upDropAll" title="把文件拖到这里，无需打开文件选择窗口">
           <span class="dicon">📥</span>
           <span class="dhint">或把文件 / 整个文件夹直接拖到这里</span><br>
           <span>视频、字幕、封面图、Word/Excel/PPT/PDF 都可以；绕开系统文件选择窗口</span>
         </div>
-        <p class="muted" style="margin:0" data-page-node-id="nlhF8g2OEpF9DKhrgbKQWa">可一次选择多个文件：视频与同名字幕自动配对；Office 文档按内容哈希独立入池，可在「文档库」在线编辑、改名、看版本。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
+        <p class="muted" style="margin:0" data-page-node-id="nlhF8g2OEpF9DKhrgbKQWa">可一次选择多个文件：视频与同名字幕自动配对；Office 文档按内容哈希独立入池，可在「文档库」在线编辑、改名、看版本。系统文件窗口不再按类型过滤（避免卡顿），选完后由页面校验，不支持的类型会被自动忽略；想只看某类文件时，在文件名框输入 <b>*.xlsx</b> 这样的通配符回车即可。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
         <div style="display:flex;gap:10px;align-items:center" data-page-node-id="sEfKPiEqomYAjFscxx01y4">
           <button class="btn-primary btn-sm" id="uploadBtn" onclick="doUpload()" data-page-node-id="VGUOfEplFV2GpknvppEQwH">开始上传</button>
           <span id="uploadMsg" class="muted" data-page-node-id="6CoTyHfP1pVMhEc1RvHImS"></span>
@@ -3808,15 +3811,24 @@ async function doUpload(){
   const pText = document.getElementById("uploadProgressText");
   const pSize = document.getElementById("uploadProgressSize");
   if(!input.files.length){ alert("请先选择要上传的文件"); return; }
+  // 系统对话框不再按类型过滤（见 input 注释：accept 会生成唯一的「自定义文件」项并卡死），
+  // 这里按扩展名白名单兜底：不支持的类型直接忽略，一个都不合法时给明确提示。
+  const allPicked = Array.from(input.files);
+  const picked = allPicked.filter(f=>_DROP_ALL_EXT.test(f.name||""));
+  const ignored = allPicked.length - picked.length;
+  if(!picked.length){
+    alert("所选文件都不在支持范围内。\n\n视频：mp4 / mkv / webm / flv / mov / m4a / mp3 / aac\n字幕：srt / vtt / ass / lrc / txt\n封面：jpg / png / webp\n文档：doc / docx / odt / rtf / xls / xlsx / ods / csv / ppt / pptx / odp / pdf\n\n只挑需要的文件即可；上传弹窗里也可直接拖拽。");
+    return;
+  }
+  const ignoredTip = ignored ? `，已忽略 ${ignored} 个不支持的文件` : "";
   // 合并入口后按本地文件名预判构成：用于结果提示与「是否需要切到文档库」
-  const picked = Array.from(input.files);
   const nDoc = picked.filter(f=>/\.(docx?|odt|rtf|xls[xs]?|ods|csv|ppt[xs]?|odp|pdf)$/i.test(f.name||"")).length;
   const nMedia = picked.length - nDoc;
   const fd = new FormData();
   fd.append("cid", target);
   let total = 0;
   for(const f of picked){ fd.append("files", f); total += f.size; }
-  btn.disabled = true; msg.textContent = `上传中（${picked.length} 个文件）…`;
+  btn.disabled = true; msg.textContent = `上传中（${picked.length} 个文件）…${ignoredTip}`;
   pWrap.classList.remove("hidden"); pBar.style.width = "0%"; pText.textContent = "0%"; pSize.textContent = `0 B / ${fmtSize(total)}`;
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
