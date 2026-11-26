@@ -192,9 +192,10 @@
     border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--sub);
     font-size:11px;cursor:pointer;white-space:nowrap;font-family:inherit}
   .lib-card .t-rename:hover{color:var(--text);border-color:#c3ccdb;background:#f7f9fc}
-  /* 字幕来源标注：与「视频」标签同行展示（原在 sub 行） */
-  .lib-card .kind-row .tag-ocr,.lib-card .sub .tag-ocr{color:#7c5cf6;font-weight:600}
-  .lib-card .kind-row .tag-official,.lib-card .sub .tag-official{color:#27ae60;font-weight:600}
+  /* 字幕来源标注：走 .kind-tag 体系，与「视频」同字号/同内距/同基线（2026-11-26） */
+  .kind-tag.k-src-official{color:#1e874b;background:rgba(39,174,96,.13)}
+  .kind-tag.k-src-ocr{color:#6b4be0;background:rgba(124,92,246,.13)}
+  .kind-tag.k-src-plain{color:var(--sub);background:rgba(120,130,150,.12)}
   /* 通用「字幕来源」标注（播放页 / 独立播放页 / 分享页「字幕原文」标题后） */
   .src-tag{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:6px;font-size:11px;
     font-weight:600;vertical-align:middle;white-space:nowrap}
@@ -1550,7 +1551,10 @@ async function renderLibGrid(){
     // 官方字幕：随视频一并落盘的字幕文件，或显式标记为 "official"。
     // 这类字幕质量已够，OCR 覆盖只会降级且改变 .bak 指向，故默认隐藏「重新识别」入口。
     const isOfficial = (_src === "official");
-    const subTag = it.subtitle ? `<span class="${_src==="ocr"?"tag-ocr":isOfficial?"tag-official":""}">${_src==="ocr"?"OCR字幕":isOfficial?"官方字幕":"有字幕"}</span>` : "";
+    // 字幕来源标签：必须带 kind-tag（否则缺 11px 字号/内距，视觉比「视频」大且基线偏下）
+    const subTag = it.subtitle
+      ? `<span class="kind-tag ${_src==="ocr" ? "k-src-ocr" : (isOfficial ? "k-src-official" : "k-src-plain")}">${_src==="ocr"?"OCR字幕":isOfficial?"官方字幕":"有字幕"}</span>`
+      : "";
     const checked = _sel.has(it.rel_path) ? "checked" : "";
     const picked = _sel.has(it.rel_path) ? " picked" : "";
     // 内嵌硬字幕（字幕条 OCR）入口 —— 仅自己的视频：
