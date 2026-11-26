@@ -185,8 +185,16 @@
   .lib-card .t{font-size:13.5px;line-height:1.4;max-height:2.8em;overflow:hidden;display:-webkit-box;
     -webkit-line-clamp:2;-webkit-box-orient:vertical}
   .lib-card .sub{font-size:11.5px;color:var(--sub);margin-top:4px;display:flex;gap:8px;align-items:center}
-  .lib-card .sub .tag-ocr{color:#7c5cf6;font-weight:600}
-  .lib-card .sub .tag-official{color:#27ae60;font-weight:600}
+  /* 标题行：文件名 + 行内「改名」（2026-11-26 按大王要求放到文件名后） */
+  .lib-card .t-row{display:flex;gap:6px;align-items:flex-start}
+  .lib-card .t-row .t{flex:1;min-width:0}
+  .lib-card .t-rename{flex:none;margin-top:1px;padding:0 6px;height:20px;line-height:18px;
+    border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--sub);
+    font-size:11px;cursor:pointer;white-space:nowrap;font-family:inherit}
+  .lib-card .t-rename:hover{color:var(--text);border-color:#c3ccdb;background:#f7f9fc}
+  /* 字幕来源标注：与「视频」标签同行展示（原在 sub 行） */
+  .lib-card .kind-row .tag-ocr,.lib-card .sub .tag-ocr{color:#7c5cf6;font-weight:600}
+  .lib-card .kind-row .tag-official,.lib-card .sub .tag-official{color:#27ae60;font-weight:600}
   /* 通用「字幕来源」标注（播放页 / 独立播放页 / 分享页「字幕原文」标题后） */
   .src-tag{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:6px;font-size:11px;
     font-weight:600;vertical-align:middle;white-space:nowrap}
@@ -1567,9 +1575,9 @@ async function renderLibGrid(){
       ${ocrBtn}
       ${cover}
       <div class="meta">
-        <div class="t">${esc(it.title||it.rel_path)}</div>
-        <div class="kind-row">${_kindTags(it)}</div>
-        <div class="sub">${dur}${subTag}${stale}</div>
+        <div class="t-row"><div class="t">${esc(it.title||it.rel_path)}</div>${_renameInline(it, i)}</div>
+        <div class="kind-row">${_kindTags(it)}${subTag}</div>
+        <div class="sub">${dur}${stale}</div>
         <div class="pv-row"><button class="pv-btn" title="${isArt?"在当前页面弹窗里阅读正文（不跳转）":"在当前页面弹窗里快速预览（不跳转）"}"
           onclick="event.stopPropagation();playLibItem(${i})">${isArt?"▢ 阅读":"▢ 预览"}</button>${isArt
           ? `<button class="pv-btn" title="编辑这篇图文（归档文章派生副本，原文不动）" onclick="event.stopPropagation();openArtEditorForItem(currentCollItems()[${i}])">✎ 编辑</button>` : ""}${_ooBtn(it, i)}</div>
@@ -1635,8 +1643,12 @@ function _coverHTML(it){
 function _ooBtn(it, i){
   if(!_isOffice(it) || !_auth.oo_enabled || it.shared) return "";
   return `<button class="pv-btn" title="用 ONLYOFFICE 在线编辑（保存后派生新版本）" onclick="event.stopPropagation();openOnlyOffice(currentCollItems()[${i}])">✎ 编辑</button>`
-    + `<button class="pv-btn" title="查看该文档的版本历史（可切换当前版本）" onclick="event.stopPropagation();openOOVersions(currentCollItems()[${i}])">🕘 版本</button>`
-    + `<button class="pv-btn" title="重命名文档（卡片名、编辑器标题、下载名同步更新；历史版本保留当时名称）" onclick="event.stopPropagation();renameOODoc(currentCollItems()[${i}])">✎ 改名</button>`;
+    + `<button class="pv-btn" title="查看该文档的版本历史（可切换当前版本）" onclick="event.stopPropagation();openOOVersions(currentCollItems()[${i}])">🕘 版本</button>`;
+}
+/* 行内「改名」：跟随文件名右侧（2026-11-26 从按钮行移出），共享只读/未启用时返回空。 */
+function _renameInline(it, i){
+  if(!_isOffice(it) || !_auth.oo_enabled || it.shared) return "";
+  return `<button class="t-rename" title="重命名文档（卡片名、编辑器标题、下载名同步更新；历史版本保留当时名称）" onclick="event.stopPropagation();renameOODoc(currentCollItems()[${i}])">✎ 改名</button>`;
 }
 function openOnlyOffice(item){
   if(!item || !item.resource_id){ alert("该资源缺少 resource_id，无法在线编辑"); return; }
