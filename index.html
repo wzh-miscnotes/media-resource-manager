@@ -608,9 +608,9 @@
         <button class="btn-ghost btn-sm hidden" id="btnPruneShared" onclick="pruneShared()" title="从「被共享」中移除已过期 / 对方已取消的条目" data-page-node-id="btnPruneShared">🧹 清理失效</button>
         <button class="btn-ghost btn-sm" onclick="openShareList()" title="管理我生成的全部分享链接" data-page-node-id="shareListBtn">🔗 我的共享</button>
         <button class="btn-ghost btn-sm" id="btnPending" onclick="openPending()" title="查看未能自动匹配到资源的字幕/封面，可手动挂到资源或丢弃">📎 待补挂<span id="pendingBadge" class="hidden"></span></button>
-        <button class="btn-ghost btn-sm" id="btnUpload" onclick="openUpload()" data-page-node-id="tSrfiE3LOHnTkdCjjSf8CI">⬆ 上传</button>
-        <!-- 文档上传独立入口（2026-11-26）：文档库 tab 才显示，accept 仅 office 后缀；视频上传链路完全不动 -->
-        <button class="btn-ghost btn-sm hidden" id="btnUploadDoc" onclick="openDocUpload()" title="上传 Word/Excel/PPT/PDF 等在线文档到当前合集">⬆ 上传文档</button>
+        <!-- 统一上传入口（2026-11-26 合并「上传文档」）：后端 /api/upload 本就按扩展名分流，
+             一个入口即可同时收视频/字幕/封面/Office 文档，避免同排两个上传按钮 -->
+        <button class="btn-ghost btn-sm" id="btnUpload" onclick="openUpload()" title="上传视频、字幕、封面图或 Word/Excel/PPT/PDF 文档到当前合集" data-page-node-id="tSrfiE3LOHnTkdCjjSf8CI">⬆ 上传</button>
         <button class="btn-ghost btn-sm" id="btnImportDir" onclick="openImportDir()" data-page-node-id="rmImportDir">📂 目录导入</button>
         <button class="btn-primary btn-sm" id="btnNewArticle" onclick="switchTab('article');openArtEditor()" title="用富文本编辑器新建图文（开源部署无需采集端）">✍️ 新建图文</button>
         <!-- ONLYOFFICE 新建文档：仅后端 oo_enabled=true 时显示，与「新建图文」并列且互不干扰 -->
@@ -714,7 +714,7 @@
   <div class="modal-mask hidden" id="uploadMask" onclick="if(event.target===this)closeUpload()" data-page-node-id="fE8MIkhPNLdJHSiMzHw1GO">
     <div class="modal" data-page-node-id="HGFZundmQHrKxlDXaNsHWE">
       <div class="modal-head" data-page-node-id="keBhHY3P9IbBfj0AD3aL4d">
-        <div class="mt" data-page-node-id="GzSEoWwHSmJVGvC9cEDckz">⬆ 上传本地视频（及字幕）到合集</div>
+        <div class="mt" data-page-node-id="GzSEoWwHSmJVGvC9cEDckz">⬆ 上传文件到合集（视频 / 字幕 / 文档）</div>
         <button class="btn-ghost btn-sm" onclick="closeUpload()" data-page-node-id="DdzdZ4nzxsq96qAMwW9Vg7">关闭</button>
       </div>
       <div class="modal-body" style="flex-direction:column;padding:14px;gap:12px" data-page-node-id="Xdjbfs6ARTzNxDmtS3ounI">
@@ -722,14 +722,16 @@
           <span class="muted" data-page-node-id="88TN6mD43PHjYXZHysrGRa">目标合集：</span>
           <select id="uploadTarget" data-page-node-id="P7dHRuDKQOgZGaJIxJXyDB"></select>
         </div>
+        <!-- accept 只用纯后缀、不写 video/* 之类 MIME 通配：Windows 文件对话框对「唯一的自定义
+             类型」展开枚举很慢（大王定位的卡顿源），纯后缀列表会生成「自定义 + 所有文件」两项，点下拉不卡 -->
         <input type="file" id="uploadFiles" multiple
-          accept="video/*,.mkv,.webm,.flv,.mov,.mp3,.aac,.srt,.vtt,.ass,.lrc,.txt,.jpg,.jpeg,.png,.webp,.json" data-page-node-id="i2iuMKgwQSjly3FuLz8JfC">
-        <div class="up-drop" id="upDropVideo" title="把文件拖到这里，无需打开文件选择窗口">
+          accept=".mp4,.mkv,.webm,.flv,.mov,.m4a,.mp3,.aac,.srt,.vtt,.ass,.lrc,.txt,.jpg,.jpeg,.png,.webp,.json,.doc,.docx,.odt,.rtf,.xls,.xlsx,.ods,.csv,.ppt,.pptx,.odp,.pdf" data-page-node-id="i2iuMKgwQSjly3FuLz8JfC">
+        <div class="up-drop" id="upDropAll" title="把文件拖到这里，无需打开文件选择窗口">
           <span class="dicon">📥</span>
           <span class="dhint">或把文件 / 整个文件夹直接拖到这里</span><br>
-          <span>绕开系统文件选择窗口（网络盘、大视频目录从此处拖入更快）</span>
+          <span>视频、字幕、封面图、Word/Excel/PPT/PDF 都可以；绕开系统文件选择窗口</span>
         </div>
-        <p class="muted" style="margin:0" data-page-node-id="nlhF8g2OEpF9DKhrgbKQWa">可一次选择多个文件；视频与字幕按「文件名主干相同」自动配对（字幕随视频绑定）。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
+        <p class="muted" style="margin:0" data-page-node-id="nlhF8g2OEpF9DKhrgbKQWa">可一次选择多个文件：视频与同名字幕自动配对；Office 文档按内容哈希独立入池，可在「文档库」在线编辑、改名、看版本。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
         <div style="display:flex;gap:10px;align-items:center" data-page-node-id="sEfKPiEqomYAjFscxx01y4">
           <button class="btn-primary btn-sm" id="uploadBtn" onclick="doUpload()" data-page-node-id="VGUOfEplFV2GpknvppEQwH">开始上传</button>
           <span id="uploadMsg" class="muted" data-page-node-id="6CoTyHfP1pVMhEc1RvHImS"></span>
@@ -739,41 +741,6 @@
           <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--sub);margin-top:4px">
             <span id="uploadProgressText">0%</span>
             <span id="uploadProgressSize">0 B / 0 B</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <!-- 在线文档上传（2026-11-26）：与视频上传完全分离，accept 仅 OFFICE_EXT；
-       复用 /api/upload 的 office 分流链路（app.py 按内容哈希独立入池），不改视频上传任何代码。 -->
-  <div class="modal-mask hidden" id="docUploadMask" onclick="if(event.target===this)closeDocUpload()">
-    <div class="modal" style="width:min(560px,94vw);max-height:90vh">
-      <div class="modal-head">
-        <div class="mt">⬆ 上传在线文档</div>
-        <button class="btn-ghost btn-sm" onclick="closeDocUpload()">关闭</button>
-      </div>
-      <div class="modal-body" style="flex-direction:column;padding:14px;gap:12px">
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <span class="muted">目标合集：</span>
-          <select id="docUploadTarget"></select>
-        </div>
-        <input type="file" id="docUploadFiles" multiple
-          accept=".docx,.doc,.odt,.rtf,.xlsx,.xls,.ods,.csv,.pptx,.ppt,.odp,.pdf">
-        <div class="up-drop" id="upDropDoc" title="把文档拖到这里，无需打开文件选择窗口">
-          <span class="dicon">📥</span>
-          <span class="dhint">或把文档 / 整个文件夹直接拖到这里</span><br>
-          <span>绕开系统文件选择窗口；非文档类型会自动忽略</span>
-        </div>
-        <p class="muted" style="margin:0">支持 Word / Excel / PPT / PDF / ODF / RTF / CSV 文档；可一次选多个，按内容哈希去重入库。上传后可到「文档库」在线编辑、改名、看版本历史。大文件受网关超时限制，建议单文件不超过约 1GB。</p>
-        <div style="display:flex;gap:10px;align-items:center">
-          <button class="btn-primary btn-sm" id="docUploadBtn" onclick="doDocUpload()">开始上传</button>
-          <span id="docUploadMsg" class="muted"></span>
-        </div>
-        <div id="docUploadProgressWrap" class="hidden" style="width:100%">
-          <div class="bar" style="margin:0"><i id="docUploadProgressBar"></i></div>
-          <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--sub);margin-top:4px">
-            <span id="docUploadProgressText">0%</span>
-            <span id="docUploadProgressSize">0 B / 0 B</span>
           </div>
         </div>
       </div>
@@ -1342,7 +1309,8 @@ function _filterByKind(items){
    用 .hidden 而不是 disabled：图文库里留一个「上传视频」入口，点了还会传视频文件，
    留着只会误导；反之视频库里也不需要「新建图文」。
    共用项（合集、移动到、全选、删除选中、我的共享…）与类型无关，两库都保留。 */
-const _VID_TOOLS = ["btnUpload", "btnImportDir", "btnPending", "btnGenArticles", "btnDelArticles"];
+// btnUpload 不在列表里：合并上传入口后它对所有库都适用（视频/字幕/文档），始终显示
+const _VID_TOOLS = ["btnImportDir", "btnPending", "btnGenArticles", "btnDelArticles"];
 const _ART_TOOLS = ["btnNewArticle", "btnArtImgImport"];
 // 文档库也用「目录导入」：后端按 OFFICE_EXT 归类为 office 入池（app.py:6665），故不隐藏它
 const _VID_ONLY = ["btnPending", "btnGenArticles", "btnDelArticles"];
@@ -1360,10 +1328,9 @@ function _applyKindUI(){
     const el = document.getElementById(id);
     if(el) el.classList.toggle("hidden", isVid || isOffice);
   });
-  // 上传入口按类型分流：全部/文档库显示「上传文档」，视频/图文库只显示「上传（视频）」
-  // （2026-11-26：用户反馈「全部」视图找不到文档上传入口，故放开 all）
-  const bUD = document.getElementById("btnUploadDoc");
-  if(bUD) bUD.classList.toggle("hidden", !(isOffice || _libKind === "all"));
+  // 统一上传入口：任何 tab 都显示（一个弹窗收视频/字幕/Office 文档）
+  const bU = document.getElementById("btnUpload");
+  if(bU) bU.classList.remove("hidden");
   // 新建文档入口沿用 _applyOOUI 按 oo_enabled 的显隐，不在此处改写
 }
 
@@ -1457,12 +1424,8 @@ async function renderLibGrid(){
   const bU = document.getElementById("btnUpload");
   if(bU){
     bU.disabled = isShared || isTrash; bU.style.opacity = (isShared||isTrash) ? .5 : 1;
-    bU.title = isShared ? "「被共享」里的文件属于对方，不能在这里上传" : (isTrash ? "回收站为只读，不能上传" : "");
-  }
-  const bUDoc = document.getElementById("btnUploadDoc");
-  if(bUDoc){
-    bUDoc.disabled = isShared || isTrash; bUDoc.style.opacity = (isShared||isTrash) ? .5 : 1;
-    bUDoc.title = isShared ? "「被共享」里的文件属于对方，不能在这里上传" : (isTrash ? "回收站为只读，不能上传" : "上传 Word/Excel/PPT/PDF 等在线文档到当前合集");
+    bU.title = isShared ? "「被共享」里的文件属于对方，不能在这里上传"
+      : (isTrash ? "回收站为只读，不能上传" : "上传视频、字幕、封面图或 Word/Excel/PPT/PDF 文档到当前合集");
   }
   const bP = document.getElementById("btnPruneShared");
   if(bP) bP.classList.toggle("hidden", !isShared);
@@ -3813,7 +3776,13 @@ function fillCollSelect(sel){
 function fmtSize(b){ b=Number(b)||0; if(b>1073741824) return (b/1073741824).toFixed(2)+" GB";
   if(b>1048576) return (b/1048576).toFixed(1)+" MB"; if(b>1024) return (b/1024).toFixed(0)+" KB"; return b+" B"; }
 
-function openUpload(){ fillCollSelect(document.getElementById("uploadTarget")); document.getElementById("uploadMsg").textContent=""; document.getElementById("uploadMask").classList.remove("hidden"); }
+function openUpload(){
+  fillCollSelect(document.getElementById("uploadTarget"));
+  document.getElementById("uploadMsg").textContent = "";
+  document.getElementById("uploadFiles").value = "";           // 清掉上次残留选择
+  document.getElementById("uploadProgressWrap").classList.add("hidden");
+  document.getElementById("uploadMask").classList.remove("hidden");
+}
 function closeUpload(){ document.getElementById("uploadMask").classList.add("hidden"); }
 async function doUpload(){
   const target = document.getElementById("uploadTarget").value;
@@ -3825,11 +3794,15 @@ async function doUpload(){
   const pText = document.getElementById("uploadProgressText");
   const pSize = document.getElementById("uploadProgressSize");
   if(!input.files.length){ alert("请先选择要上传的文件"); return; }
+  // 合并入口后按本地文件名预判构成：用于结果提示与「是否需要切到文档库」
+  const picked = Array.from(input.files);
+  const nDoc = picked.filter(f=>/\.(docx?|odt|rtf|xls[xs]?|ods|csv|ppt[xs]?|odp|pdf)$/i.test(f.name||"")).length;
+  const nMedia = picked.length - nDoc;
   const fd = new FormData();
   fd.append("cid", target);
   let total = 0;
-  for(const f of input.files){ fd.append("files", f); total += f.size; }
-  btn.disabled = true; msg.textContent = `上传中（${input.files.length} 个文件）…`;
+  for(const f of picked){ fd.append("files", f); total += f.size; }
+  btn.disabled = true; msg.textContent = `上传中（${picked.length} 个文件）…`;
   pWrap.classList.remove("hidden"); pBar.style.width = "0%"; pText.textContent = "0%"; pSize.textContent = `0 B / ${fmtSize(total)}`;
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
@@ -3846,64 +3819,18 @@ async function doUpload(){
       try{ j = JSON.parse(xhr.responseText || "{}"); }catch(_){}
       if(xhr.status >= 200 && xhr.status < 300){
         const parts = [];
-        if(j.added) parts.push(`新增 ${j.added} 个视频`);
+        if(j.added) parts.push(`新增 ${j.added} 个`);
         if(j.attached) parts.push(`补挂 ${j.attached} 个衍生物`);
         if(j.pending) parts.push(`${j.pending} 个待补挂（视频入池后自动关联）`);
         if(j.skipped) parts.push(`跳过 ${j.skipped} 个`);
-        msg.textContent = "上传完成：" + (parts.length ? parts.join("，") : "无变化");
-        setTimeout(()=>{ closeUpload(); loadLibrary(); }, 600);
-      } else {
-        msg.textContent = "上传失败："+(j.detail||xhr.statusText||xhr.status);
-        pWrap.classList.add("hidden");
-      }
-      resolve();
-    });
-    xhr.addEventListener("error", () => { btn.disabled = false; msg.textContent = "上传出错：网络错误"; pWrap.classList.add("hidden"); resolve(); });
-    xhr.addEventListener("abort", () => { btn.disabled = false; msg.textContent = "上传已取消"; pWrap.classList.add("hidden"); resolve(); });
-    xhr.open("POST", "/api/upload");
-    xhr.send(fd);
-  });
-}
-
-/* ---- 在线文档上传（独立入口，2026-11-26）----
-   与视频上传完全隔离：独立 input/accept/弹窗/函数，后端同样走 /api/upload 的 office 分流。
-   这样视频链路（含 video/* 过滤、字幕配对）一行不改，文档也不会被视频过滤规则挡住。 */
-function openDocUpload(){ fillCollSelect(document.getElementById("docUploadTarget")); document.getElementById("docUploadMsg").textContent=""; document.getElementById("docUploadMask").classList.remove("hidden"); }
-function closeDocUpload(){ document.getElementById("docUploadMask").classList.add("hidden"); }
-async function doDocUpload(){
-  const target = document.getElementById("docUploadTarget").value;
-  const input = document.getElementById("docUploadFiles");
-  const msg = document.getElementById("docUploadMsg");
-  const btn = document.getElementById("docUploadBtn");
-  const pWrap = document.getElementById("docUploadProgressWrap");
-  const pBar = document.getElementById("docUploadProgressBar");
-  const pText = document.getElementById("docUploadProgressText");
-  const pSize = document.getElementById("docUploadProgressSize");
-  if(!input.files.length){ alert("请先选择要上传的文档"); return; }
-  const bad = Array.from(input.files).filter(f=>!/\.(docx?|odt|rtf|xls[xs]?|ods|csv|ppt[xs]?|odp|pdf)$/i.test(f.name||""));
-  if(bad.length){ alert("仅支持 Word/Excel/PPT/PDF/ODF/RTF/CSV 文档，以下文件被排除：\n" + bad.map(f=>f.name).join("\n")); return; }
-  const fd = new FormData();
-  fd.append("cid", target);
-  let total = 0;
-  for(const f of input.files){ fd.append("files", f); total += f.size; }
-  btn.disabled = true; msg.textContent = `上传中（${input.files.length} 个文档）…`;
-  pWrap.classList.remove("hidden"); pBar.style.width = "0%"; pText.textContent = "0%"; pSize.textContent = `0 B / ${fmtSize(total)}`;
-  return new Promise((resolve) => {
-    const xhr = new XMLHttpRequest();
-    xhr.upload.addEventListener("progress", (e) => {
-      if(!e.lengthComputable) return;
-      const pct = Math.min(100, Math.round(e.loaded * 100 / e.total));
-      pBar.style.width = pct + "%"; pText.textContent = pct + "%";
-      pSize.textContent = `${fmtSize(e.loaded)} / ${fmtSize(e.total)}`;
-    });
-    xhr.addEventListener("load", () => {
-      btn.disabled = false;
-      let j = {};
-      try{ j = JSON.parse(xhr.responseText || "{}"); }catch(_){}
-      if(xhr.status >= 200 && xhr.status < 300){
-        msg.textContent = "上传完成：新增 " + (j.added||0) + " 个文档" + (j.skipped ? "，跳过 " + j.skipped + " 个" : "");
+        // 文档去向说明：视频/图文库里看不到新文档，避免误以为上传失败
+        const docNote = (nDoc && (_libKind === "video" || _libKind === "article"))
+          ? `（含 ${nDoc} 个文档，已入「文档库」）` : "";
+        msg.textContent = "上传完成：" + (parts.length ? parts.join("，") : "无变化") + docNote;
         input.value = "";
-        if(_libKind !== "office" && _libKind !== "all") switchTab("office"); else loadLibrary();
+        // 纯文档上传且当前不在文档库/全部 → 自动切到文档库，直接看到结果
+        const goOffice = nDoc > 0 && nMedia === 0 && _libKind !== "office" && _libKind !== "all";
+        setTimeout(()=>{ closeUpload(); if(goOffice) switchTab("office"); else loadLibrary(); }, 600);
       } else {
         msg.textContent = "上传失败："+(j.detail||xhr.statusText||xhr.status);
         pWrap.classList.add("hidden");
@@ -3918,11 +3845,11 @@ async function doDocUpload(){
 }
 
 /* ---- 拖拽上传（2026-11-26，治本：绕开 Windows 文件选择对话框卡顿）----
-   拖入文件/文件夹 → 递归收集 → 按后缀过滤 → 用 DataTransfer 填入现有 input.files，
-   完全复用 doUpload / doDocUpload（上传逻辑一行不改）。
-   注意：必须在 dragover 里 preventDefault，否则浏览器会把文件当导航打开。 */
-const _DROP_VIDEO_EXT = /\.(mp4|mkv|webm|flv|mov|m4a|mp3|aac|srt|vtt|ass|lrc|txt|jpg|jpeg|png|webp|json)$/i;
-const _DROP_DOC_EXT   = /\.(docx?|odt|rtf|xls[xs]?|ods|csv|ppt[xs]?|odp|pdf)$/i;
+   拖入文件/文件夹 → 递归收集 → 按后缀过滤 → 用 DataTransfer 填入 input.files，
+   完全复用 doUpload（上传逻辑一行不改）。
+   注意：必须在 dragover 里 preventDefault，否则浏览器会把文件当导航打开。
+   2026-11-26 起与「上传文档」合并：一个拖拽区收视频/字幕/封面/Office 文档。 */
+const _DROP_ALL_EXT = /\.(mp4|mkv|webm|flv|mov|m4a|mp3|aac|srt|vtt|ass|lrc|txt|jpg|jpeg|png|webp|json|docx?|odt|rtf|xls[xs]?|ods|csv|ppt[xs]?|odp|pdf)$/i;
 function _collectDropped(entry, out, re, prefix){
   // entry 是 FileSystemEntry；webkitGetAsEntry 不可用时会 fallback 到 e.dataTransfer.files
   if(!entry) return Promise.resolve();
@@ -3971,14 +3898,12 @@ function _setupDropZone(zoneId, inputId, re){
     picked.forEach(f=>ndt.items.add(f));
     input.files = ndt.files;
     if(hint) hint.textContent = `已放入 ${picked.length} 个文件（可直接点「开始上传」）`;
-    const msgId = inputId === "docUploadFiles" ? "docUploadMsg" : "uploadMsg";
-    const m = document.getElementById(msgId);
+    const m = document.getElementById("uploadMsg");
     if(m) m.textContent = `已从拖拽区放入 ${picked.length} 个文件`;
   });
 }
 function _initDropZones(){
-  _setupDropZone("upDropVideo", "uploadFiles", _DROP_VIDEO_EXT);
-  _setupDropZone("upDropDoc", "docUploadFiles", _DROP_DOC_EXT);
+  _setupDropZone("upDropAll", "uploadFiles", _DROP_ALL_EXT);
 }
 if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", _initDropZones);
 else _initDropZones();   // 脚本晚于 DOM 就绪时直接初始化
