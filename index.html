@@ -661,6 +661,7 @@
               <button class="btn-primary btn-sm" id="playerDocEdit" onclick="openOnlyOffice(currentLibItem)">✎ 在线编辑</button>
               <a class="btn-ghost btn-sm" id="playerDocDl" href="#" download>⬇ 下载原文件</a>
               <button class="btn-ghost btn-sm" id="playerDocVer" onclick="openOOVersions(currentLibItem)">🕘 版本历史</button>
+              <button class="btn-ghost btn-sm hidden" id="playerDocRename" onclick="renameOODoc(currentLibItem)">✎ 重命名</button>
             </div>
             <div class="doc-preview hidden" id="playerDocPreview"></div>
           </div>
@@ -1090,6 +1091,7 @@
               <button class="btn-primary btn-sm" id="plpDocEdit" onclick="openOnlyOffice(_ppItems[_ppIdx])">✎ 在线编辑</button>
               <a class="btn-ghost btn-sm" id="plpDocDl" href="#" download>⬇ 下载原文件</a>
               <button class="btn-ghost btn-sm" id="plpDocVer" onclick="openOOVersions(_ppItems[_ppIdx])">🕘 版本历史</button>
+              <button class="btn-ghost btn-sm hidden" id="plpDocRename" onclick="renameOODoc(_ppItems[_ppIdx])">✎ 重命名</button>
             </div>
             <div class="doc-preview hidden" id="plpDocPreview"></div>
           </div>
@@ -1562,17 +1564,57 @@ function _coverHTML(it){
   }
   return `<div class="thumb-ph">无封面</div>`;
 }
-/* 文档卡片按钮：下载统一到顶部批量栏（与视频/图文一致），此处只留编辑/版本。
+/* 文档卡片按钮：下载统一到顶部批量栏（与视频/图文一致），此处留编辑/版本/重命名。
    共享只读文档不给编辑；单文件下载仍可从播放页 doc-view「下载原文件」进入。
    参数 i 保留（兼容调用点签名），本函数已不再按 index 取条目。 */
 function _ooBtn(it, i){
   if(!_isOffice(it) || !_auth.oo_enabled || it.shared) return "";
   return `<button class="pv-btn" title="用 ONLYOFFICE 在线编辑（保存后派生新版本）" onclick="event.stopPropagation();openOnlyOffice(currentCollItems()[${i}])">✎ 编辑</button>`
-    + `<button class="pv-btn" title="查看该文档的版本历史（可切换当前版本）" onclick="event.stopPropagation();openOOVersions(currentCollItems()[${i}])">🕘 版本</button>`;
+    + `<button class="pv-btn" title="查看该文档的版本历史（可切换当前版本）" onclick="event.stopPropagation();openOOVersions(currentCollItems()[${i}])">🕘 版本</button>`
+    + `<button class="pv-btn" title="重命名文档（卡片名、编辑器标题、下载名同步更新；历史版本保留当时名称）" onclick="event.stopPropagation();renameOODoc(currentCollItems()[${i}])">✎ 改名</button>`;
 }
 function openOnlyOffice(item){
   if(!item || !item.resource_id){ alert("该资源缺少 resource_id，无法在线编辑"); return; }
   window.open("/office/edit?rid=" + encodeURIComponent(item.resource_id), "_blank");
+}
+/* 文档重命名（2026-11-26）：后端同步 title + 物理文件名 + rel_path 三者。
+   用户输入不含扩展名；成功后同步内存项与已打开的 doc-view（名称、下载链接即时更新），
+   再重拉列表。历史版本保留当时名称，下次保存的新版本自动用新名。 */
+async function renameOODoc(item){
+  if(!item || !item.resource_id){ alert("该资源缺少 resource_id，无法重命名"); return; }
+  if(item.shared){ alert("共享资源只读，不能重命名"); return; }
+  if(!_auth.oo_enabled){ alert("在线文档功能未启用"); return; }
+  const cur = item.title || (item.rel_path||"").split("/").pop() || "";
+  const input = prompt("输入新的文档名称（不含扩展名）：", cur);
+  if(input === null) return;
+  const name = input.trim();
+  if(!name){ alert("名称不能为空"); return; }
+  if(name === cur) return;
+  try{
+    const r = await fetch("/api/oo/rename", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({rid:item.resource_id, name})});
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok){ alert("重命名失败：" + (j.detail || r.status)); return; }
+    const libItem = (typeof currentLibItem !== "undefined") ? currentLibItem : null;
+    const ppItems = (typeof _ppItems !== "undefined") ? _ppItems : [];
+    const ppIdx = (typeof _ppIdx !== "undefined") ? _ppIdx : -1;
+    [libItem].concat(ppItems, currentCollItems ? currentCollItems() : []).forEach(x=>{
+      if(x && x.resource_id === item.resource_id){ x.title = j.title; x.rel_path = j.rel_path; }
+    });
+    [["playerDoc", libItem], ["plpDoc", ppItems[ppIdx]]].forEach(([p, shown])=>{
+      if(!shown || shown.resource_id !== item.resource_id) return;
+      const nm = document.getElementById(p+"Name");
+      if(nm) nm.textContent = j.title;
+      const dl = document.getElementById(p+"Dl");
+      if(dl){
+        const q = shown.share_token ? ("?share=" + encodeURIComponent(shown.share_token)) : "";
+        dl.href = "/api/files/" + encodeURI(j.rel_path) + q;
+        dl.download = j.file_name;
+      }
+    });
+    await loadLibrary();
+    alert("已重命名为：" + j.title);
+  }catch(e){ alert("重命名失败：" + e); }
 }
 /* office 文档信息视图（播放页 #plpDoc / 弹窗 #playerDoc 共用）。
    不把 .xlsx/.docx 塞进 <video>——那会一直转圈。只展示信息 + 编辑/下载入口。
@@ -1593,6 +1635,8 @@ function _renderDocView(prefix, it, mediaUrl, canEdit){
   if(editBtn) editBtn.classList.toggle("hidden", !canEdit);
   const verBtn = document.getElementById(prefix+"Ver");
   if(verBtn) verBtn.classList.toggle("hidden", !canEdit);
+  const rnBtn = document.getElementById(prefix+"Rename");
+  if(rnBtn) rnBtn.classList.toggle("hidden", !canEdit || !!it.shared);
   const dl = document.getElementById(prefix+"Dl");
   if(dl){ dl.href = mediaUrl; dl.download = (it.rel_path||"").split("/").pop() || "document"; }
   _loadDocPreview(prefix, it, mediaUrl);

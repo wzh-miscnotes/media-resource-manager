@@ -2251,6 +2251,112 @@ def oo_create(req: OOCreateReq, request: Request):
             "file_type": ext.lstrip("."), "size": len(data)}
 
 
+class OORenameReq(BaseModel):
+    rid: str = ""
+    name: str = ""
+
+
+@app.post("/api/oo/rename")
+def oo_rename(req: OORenameReq, sid: str = Depends(current_identity)):
+    """重命名在线文档（2026-11-26）：display title、物理文件名、条目 rel_path 三者同步。
+
+    为什么必须三者同步：卡片名取 entry['title']，而编辑器标题栏/下载名/预览标题都取
+    物理文件名，编辑与下载又按 entry['rel_path'] 定位文件——只改其中一处会出现
+    「卡片叫新名、打开还是旧名」或「指针指向不存在文件」的不一致。
+
+    内容寻址不变：rid / body_key8 由文件内容哈希派生，改文件名不影响版本链。
+    共享引用：同一物理文件可能被多个条目引用（内容去重），此时复制新文件并只改本人
+    指针，避免断掉他人引用；仅 1 个引用时直接 rename。
+    已有分享链接：同步本人令牌里的 rel_path/title，避免对方链接失效。
+    版本历史：只更新当前版本的 title，历史版本保留当时名称。
+    """
+    _oo_guard()
+    if not sid:
+        raise HTTPException(401, "需登录")
+    rid = (req.rid or "").strip()
+    raw = (req.name or "").strip()
+    if not rid:
+        raise HTTPException(400, "rid 必填")
+    if not raw:
+        raise HTTPException(400, "新名称不能为空")
+    with _collections_txn():
+        data = _load_collections()
+        cols = data.get(_sid_key(sid), {}).get("collections", [])
+        target = None
+        for c in cols:
+            if c.get("id") == "__trash__":
+                continue
+            for it in c.get("items", []):
+                if _rid_of_item(it) != rid:
+                    continue
+                rel = (it.get("rel_path") or "").replace("\\", "/")
+                if not rel.startswith("resources/") or os.path.splitext(rel)[1].lower() not in OFFICE_EXT:
+                    continue
+                if it.get("shared"):
+                    raise HTTPException(403, "共享资源只读，不能重命名")
+                target = it
+                break
+            if target:
+                break
+        if target is None:
+            raise HTTPException(404, "文档不存在或不可重命名")
+        old_rel = (target.get("rel_path") or "").replace("\\", "/")
+        old_abs = os.path.abspath(os.path.join(DOWNLOADS, old_rel))
+        if not old_rel.startswith("resources/") or not old_abs.startswith(os.path.abspath(DOWNLOADS)) \
+                or not os.path.isfile(old_abs):
+            raise HTTPException(404, "物理文件不存在，无法重命名")
+        ext = os.path.splitext(old_rel)[1].lower()
+        stem = os.path.splitext(raw)[0] if raw.lower().endswith(ext) else raw
+        safe = _safe_upload_name(stem + ext)
+        new_stem = os.path.splitext(safe)[0].strip() or "document"
+        # 重名不覆盖：同目录内自动加 _1/_2 后缀
+        new_abs = _uniq_path(os.path.join(os.path.dirname(old_abs), new_stem + ext))
+        new_rel = os.path.relpath(new_abs, DOWNLOADS).replace(os.sep, "/")
+        used_stem = os.path.splitext(os.path.basename(new_abs))[0]
+        # 跨全部用户统计该物理文件的引用数（排除回收站快照）
+        refs = 0
+        for _k, ud in data.items():
+            for c in ud.get("collections", []):
+                if c.get("id") == "__trash__":
+                    continue
+                for it in c.get("items", []):
+                    if (it.get("rel_path") or "").replace("\\", "/") == old_rel:
+                        refs += 1
+        try:
+            if refs > 1:
+                shutil.copy2(old_abs, new_abs)   # 他人仍指向旧文件，只改本人指针
+            else:
+                os.rename(old_abs, new_abs)
+        except OSError as e:
+            raise HTTPException(500, f"重命名文件失败：{e}")
+        target["rel_path"] = new_rel
+        target["title"] = used_stem
+        _save_collections()
+    # 同步本人分享令牌（对方链接继续可用）
+    shares = _load_shares()
+    changed = False
+    for _tk, rec in shares.get("tokens", {}).items():
+        if rec.get("owner") == sid and (rec.get("rel_path") or "").replace("\\", "/") == old_rel:
+            rec["rel_path"] = new_rel
+            rec["title"] = used_stem
+            changed = True
+    if changed:
+        _save_shares()
+    # 版本记录：只更新当前版本的显示名
+    d = _oo_state(sid)
+    log = (d.get("version_log") or {}).get(rid) or []
+    bk = (target.get("body_key8") or "").strip()
+    hit = next((e for e in log if bk and e.get("body_key8") == bk), None)
+    if hit is None and log:
+        hit = log[-1]
+    if hit and hit.get("title") != used_stem:
+        hit["title"] = used_stem
+        _write_json(_oo_state_path(sid), d)
+    return {"ok": True, "rid": rid, "title": used_stem,
+            "rel_path": new_rel, "file_name": os.path.basename(new_abs),
+            "shared_refs_kept": refs > 1}
+
+
 class OORollbackReq(BaseModel):
     rid: str = ""
     body_key8: str = ""
